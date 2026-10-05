@@ -225,6 +225,8 @@ function draw() {
   for (const l of leaves) l.draw();
   leaves = leaves.filter((l) => l.state !== "deleted");
   pop();
+
+  drawHint(); // ← 이 한 줄만 추가 (pop() 다음, 함수 맨 끝)
 }
 
 // ============================================================
@@ -393,6 +395,17 @@ function drawTree() {
   noStroke();
   fill(92, 38, 24); // 땅
   arc(701, 1195, 610, 96, PI, TWO_PI);
+}
+
+// 오른쪽 아래 구석 안내 문구 (화면 좌표 기준 → 창 크기와 상관없이 항상 구석에 고정)
+function drawHint() {
+  push();
+  noStroke();
+  fill(0); // 검정
+  textSize(16); // 글자 크기
+  textAlign(RIGHT, BOTTOM); // 오른쪽·아래 기준 정렬
+  text("tap, drag, hold the leaves", width - 24, height - 24); // 구석에서 24px 안쪽
+  pop();
 }
 
 // ============================================================
