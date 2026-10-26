@@ -11,11 +11,12 @@ const DEG = Math.PI / 180;
 const DW = 700,
   DH = 440; // design-space size
 const COL = {
-  bg: "#1F1F1F",
-  person: "#DCDCDC",
+  bg: "#47B8E0",
+  sky: "#fff5e6",
+  person: "#DCDCDC", // 새의 몸통색 (이미지 로딩 실패 시 대체 사람 그림에도 쓰임)
   dock: "#6B6B6B",
   rod: "#404040",
-  line: "#EDEDED",
+  line: "#a5a5a5",
   water: "#47B8E0",
   bird: "#9A9A9A",
 };
@@ -41,6 +42,28 @@ const ARM_LEN = Math.hypot(HAND_REST.x - SHOULDER.x, HAND_REST.y - SHOULDER.y);
 const PHI0 = Math.atan2(HAND_REST.y - SHOULDER.y, HAND_REST.x - SHOULDER.x);
 const ROD_LEN = 200,
   ROD_ANG = -29 * DEG; // the rod keeps one fixed pose
+// Fisher illustration: assets/fisher_body_v2.png (static: head, torso, upper arm, legs, stool, dock) and
+// assets/fisher_arm_v2.png (forearm + both gloves + reel + rod, ONE rigid piece). Both pictures share one pixel space
+// ("full" space). ANCHOR is the dock's top-right corner in that space and lands on (DOCK_RIGHT, DOCK_Y) in the scene.
+// SCALE resizes the whole fisher; ELBOW is the single rotation axis; GRIP is where the front hand holds the rod;
+// TIP is the rod tip at rest (the fishing line starts there). Poses are rotation angles about ELBOW (negative = hand up).
+const FISHER = {
+  SCALE: 0.22,
+  ANCHOR: { x: 1100, y: 1155 },
+  DOCK_RIGHT: 277,
+  ELBOW: { x: 695, y: 715 },
+  GRIP: { x: 857, y: 617 },
+  TIP: { x: 1305, y: 22 },
+  BODY: { file: "assets/fisher_body_v2.png", x: 0, y: 415 }, // top-left of each cropped picture in full space
+  ARM: { file: "assets/fisher_arm_v2.png", x: 677, y: 17 },
+  POSE: { idle: 0, catch: -7 * DEG, feed: -16 * DEG },
+  MOVE_S: 0.22, // length of a pose change (seconds); afterwards the pose is locked
+  img: null,
+  armImg: null,
+  ok: false,
+  failed: false, // 사진을 못 불러왔을 때만 true (그때만 코드로 그린 사람을 보여줌)
+  COLOR: { dock: "#8B5E3C", stool: "#B07850" }, // null = 원래 크림색. 예: "#8B5E3C"
+};
 const LEN_MIN = 40,
   LEN_MAX = 378; // fishing-line length range (drag the rod up/down)
 const STORE_KEY = "fishingMemo.v1",
@@ -58,6 +81,69 @@ const BUCKET = {
 // Dashed drop-zone frame around the bucket. It is centred on the bucket (BUCKET.mouthX), so left/right are symmetric.
 // halfW = half the frame width; padTop = gap above the "n/10" label; padBottom = how far below the bucket base it reaches.
 const ZONE_STYLE = { halfW: 34, padTop: 12, padBottom: 6 };
+// ---- Seasons + fish pictures ---------------------------------------------------------------------------
+// A memo keeps TWO separate facts: createdAt (real device time, never changed) and season (which picture the fish
+// uses; normally seasonOf(createdAt), but the calendar preview can pick another one).
+const SEASONS = ["spring", "summer", "autumn", "winter"];
+const SEASON_LABEL = {
+  spring: "봄",
+  summer: "여름",
+  autumn: "가을",
+  winter: "겨울",
+};
+// Dev switch: set e.g. 'winter' to force the fish picture of every NEW memo (createdAt is still the real time).
+// The same can be done without editing code by opening the page with ?season=winter at the end of the URL.
+const DEV_SEASON = null;
+// One picture per season (replace the files to change the design). Any key of FISH_IMG_DEFAULT may be added to a season's
+// entry to override it for that season only, e.g. summer: { file: '...', width: 1.2 }.
+// Per-season values (width / textX / textY / textA / textB) were measured on each picture: 봄 병어, 여름 민어, 가을 전어, 겨울 아귀.
+const FISH_IMG = {
+  spring: {
+    file: "assets/fish-spring.png",
+    width: 0.85,
+    textX: 0.095,
+    textY: 0,
+    textA: 0.266,
+    textB: 0.116,
+  },
+  summer: {
+    file: "assets/fish-summer.png",
+    width: 1.0,
+    textX: 0.089,
+    textY: 0.01,
+    textA: 0.307,
+    textB: 0.134,
+  },
+  autumn: {
+    file: "assets/fish-autumn.png",
+    width: 1.0,
+    textX: 0.1,
+    textY: 0.028,
+    textA: 0.286,
+    textB: 0.124,
+  },
+  winter: {
+    file: "assets/fish-winter.png",
+    width: 1.05,
+    textX: 0.154,
+    textY: 0.058,
+    textA: 0.269,
+    textB: 0.108,
+  },
+};
+// Size / position of the picture (relative to the fish length `size`, the point the fish moves / is caught by).
+const FISH_IMG_DEFAULT = {
+  width: 1.0, // picture width = size * width (height keeps the picture's own ratio)
+  anchorX: 0.5,
+  anchorY: 0.5, // which point of the picture (0..1) sits on the fish centre
+  offsetX: 0,
+  offsetY: 0, // extra shift, in units of `size`
+  facesRight: false, // false: the pictures are drawn with the head on the left (all four are)
+  textX: 0.075,
+  textY: 0.005, // where the memo text is centred while caught (units of `size`)
+  textA: 0.27,
+  textB: 0.12, // half width / half height of the text area (units of `size`)
+};
 const BUCKET_LABEL_FS = 11; // font size of the "n/10" label (design units; scales with the bucket)
 const RIM_W = BUCKET.w + 4; // displayed width of the bucket rim (pictures are scaled to this)
 const WATER_X0 = 277; // where the dock ends and the water begins
@@ -111,6 +197,8 @@ let bucket = {
   rot: 0,
   vrot: 0,
 }; // current pose; pivot = bottom centre
+let preview = { on: false, season: "spring" }; // calendar preview mode (one-shot)
+let seasonBtn, seasonPop;
 let bucketPress = null; // press on the bucket: click (toggle list) or drag (move / shake)
 let bucketPour = null; // running "empty the bucket" animation
 let dumped = []; // fish spilled on the dock (visual only; their memos are already deleted)
@@ -146,10 +234,13 @@ function setup() {
   textFont("sans-serif");
   setupInput();
   buildResetUI();
+  buildSeasonUI();
   computeLayout();
   placeInput();
   loadState(); // restore memos + bucket from localStorage
   loadBucketImages(); // async; a failed load keeps the drawn bucket
+  loadFishImages(); // async; a missing picture keeps the drawn fish
+  loadFisherImages(); // async; missing pictures keep the drawn person + rod
   const t = rodTip();
   hook.x = t.x;
   hook.y = t.y + rod.len;
@@ -166,13 +257,20 @@ function windowResized() {
   panelCache = {};
 }
 
+// The whole scene (everything except the text box, calendar and reset button) sits this many design units lower,
+// so the rod tip can rise above the dock without covering the text box. Change this one number to move it.
+const SCENE_DROP = 24;
+
 function computeLayout() {
   L.narrow = width < 760 || width / height < 1.1;
   if (L.narrow) {
     // Phone/portrait: input on top, scene below it, memo text under the scene.
-    L.u = Math.max(0.3, Math.min(width / DW, (height * 0.62 - 66) / DH));
+    L.u = Math.max(
+      0.3,
+      Math.min(width / DW, (height * 0.62 - 66) / (DH + SCENE_DROP)),
+    );
     L.ox = (width - DW * L.u) / 2;
-    L.oy = 58;
+    L.oy = 58 + SCENE_DROP * L.u;
     L.sceneH = L.oy + DH * L.u + 8;
     L.panel = {
       x: 20,
@@ -190,9 +288,10 @@ function computeLayout() {
   } else {
     // Wide: scene on the left ~64%, memo text in the empty space on the right.
     L.sceneW = width * 0.64;
-    L.u = Math.min(L.sceneW / DW, height / DH);
+    L.u = Math.min(L.sceneW / DW, height / (DH + SCENE_DROP));
     L.ox = (L.sceneW - DW * L.u) / 2;
-    L.oy = (height - DH * L.u) / 2;
+    const oy0 = (height - (DH + SCENE_DROP) * L.u) / 2; // top of the (taller) layout box; the text box stays here
+    L.oy = oy0 + SCENE_DROP * L.u;
     L.panel = {
       x: L.sceneW + 10,
       y: height * 0.14,
@@ -204,7 +303,7 @@ function computeLayout() {
     const ih = Math.max(30, 30 * L.u);
     const right = L.ox + (WATER_X1 + 3) * L.u;
     const iw = Math.max(120, right - (L.ox + 435 * L.u));
-    L.input = { x: right - iw, y: L.oy + 10 * L.u, w: iw, h: ih };
+    L.input = { x: right - iw, y: oy0 + 10 * L.u, w: iw, h: ih };
     L.btn = {
       x: width - RESET_MARGIN - 76,
       y: height - RESET_MARGIN - 38,
@@ -228,7 +327,7 @@ function setupInput() {
     boxSizing: "border-box",
     padding: "0 14px",
     background: "transparent",
-    color: "#F4F4F4",
+    color: "#000000",
     border: "1.5px solid #DCDCDC",
     borderRadius: "0",
     outline: "none",
@@ -243,7 +342,7 @@ function setupInput() {
     const st = document.createElement("style");
     st.id = "memo-input-style";
     st.textContent =
-      "#memo-input::placeholder{color:#6E6E6E}#memo-input:focus{border-color:#fff!important}";
+      "#memo-input::placeholder{color:#AFAFAF}#memo-input:focus{border-color:#AFAFAF!important}";
     document.head.appendChild(st);
   }
   // Enter submits. IME-safe (Korean): if Enter arrives mid-composition we wait for
@@ -270,6 +369,78 @@ function setupInput() {
   });
 }
 
+// Calendar icon + season picker (plain HTML elements, so mouse and touch both work and the canvas never sees these clicks).
+function buildSeasonUI() {
+  const st = document.createElement("style");
+  st.textContent =
+    "#season-btn,#season-pop button{-webkit-tap-highlight-color:transparent}" +
+    "#season-btn{position:fixed;box-sizing:border-box;display:flex;align-items:center;justify-content:center;padding:0;background:transparent;color:#DCDCDC;border:1.5px solid #DCDCDC;border-radius:0;cursor:pointer;z-index:10}" +
+    "#season-btn svg{width:62%;height:62%}" +
+    "#season-btn.on{color:#47B8E0;border-color:#47B8E0}" +
+    "#season-pop{position:fixed;box-sizing:border-box;width:64px;display:none;flex-direction:column;gap:4px;padding:6px;background:#1F1F1F;border:1.5px solid #47B8E0;font-family:sans-serif;z-index:10}" +
+    "#season-pop .hd{color:#47B8E0;font-size:12px;line-height:1.2;text-align:center;padding-bottom:2px;white-space:nowrap}" +
+    "#season-pop button{font:inherit;font-size:14px;height:30px;padding:0;border:1.5px solid #6B6B6B;border-radius:0;background:transparent;color:#DCDCDC;cursor:pointer}" +
+    "#season-pop button.sel{background:#DCDCDC;color:#1F1F1F;border-color:#DCDCDC}";
+  document.head.appendChild(st);
+
+  seasonBtn = document.createElement("button");
+  seasonBtn.id = "season-btn";
+  seasonBtn.type = "button";
+  seasonBtn.setAttribute("aria-label", "계절 미리보기");
+  seasonBtn.title = "계절 미리보기";
+  seasonBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">' +
+    '<rect x="3" y="5" width="18" height="16" rx="1.5"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="16" y1="3" x2="16" y2="7"/></svg>';
+  document.body.appendChild(seasonBtn);
+
+  seasonPop = document.createElement("div");
+  seasonPop.id = "season-pop";
+  seasonPop.innerHTML =
+    '<div class="hd">(미리보기)</div>' +
+    SEASONS.map(
+      (k) =>
+        '<button type="button" data-season="' +
+        k +
+        '">' +
+        SEASON_LABEL[k] +
+        "</button>",
+    ).join("");
+  document.body.appendChild(seasonPop);
+
+  seasonBtn.addEventListener("click", () => setPreview(!preview.on)); // icon again = cancel
+  seasonPop.addEventListener("click", (ev) => {
+    const k =
+      ev.target &&
+      ev.target.getAttribute &&
+      ev.target.getAttribute("data-season");
+    if (!SEASONS.includes(k)) return;
+    preview.season = k;
+    updateSeasonUI();
+    if (inputEl) inputEl.focus(); // go on typing the memo
+  });
+  updateSeasonUI();
+}
+
+function setPreview(on) {
+  preview.on = !!on;
+  if (preview.on) preview.season = seasonOf(Date.now()); // start on the current season
+  updateSeasonUI();
+}
+function updateSeasonUI() {
+  if (!seasonBtn) return;
+  seasonBtn.classList.toggle("on", preview.on);
+  seasonBtn.setAttribute("aria-pressed", preview.on ? "true" : "false");
+  seasonPop.style.display = preview.on ? "flex" : "none";
+  seasonPop
+    .querySelectorAll("button")
+    .forEach((bt) =>
+      bt.classList.toggle(
+        "sel",
+        bt.getAttribute("data-season") === preview.season,
+      ),
+    );
+}
+
 function placeInput() {
   const r = L.input,
     s = inputEl.style;
@@ -279,6 +450,19 @@ function placeInput() {
   s.height = r.h + "px";
   // (iOS Safari zooms the page when an input's font is under 16px, so 16 is the minimum)
   s.fontSize = Math.max(16, Math.min(20, r.h * 0.45)) + "px";
+  if (seasonBtn) {
+    // calendar icon: right next to the input, same height
+    const sz = r.h,
+      x = r.x + r.w + 8,
+      ss = seasonBtn.style,
+      ps = seasonPop.style;
+    ss.left = x + "px";
+    ss.top = r.y + "px";
+    ss.width = sz + "px";
+    ss.height = sz + "px";
+    ps.left = Math.max(8, x + sz - 64) + "px";
+    ps.top = r.y + sz + 6 + "px"; // season picker under the icon
+  }
   if (resetBtn) {
     const b = L.btn,
       bs = resetBtn.style;
@@ -307,6 +491,8 @@ function submitMemo() {
 function spawnFish(text) {
   const size = random(58, 96);
   const dir = random() < 0.5 ? -1 : 1;
+  const now = Date.now(); // the moment of creation: stored once, never recalculated
+  const season = preview.on ? preview.season : devSeason() || seasonOf(now); // picture only; createdAt stays real
   // Drop from the bottom-centre of the input box (converted to design space).
   const d = toDesign(L.input.x + L.input.w / 2, L.input.y + L.input.h);
   fishes.push(
@@ -326,9 +512,56 @@ function spawnFish(text) {
       y: d.y - 4,
       phase: random(TWO_PI),
       state: "dropping",
+      createdAt: now,
+      season,
     }),
   );
   saveState(); // important change: a new memo exists
+  if (preview.on) setPreview(false); // preview is one-shot: closes after a memo was really created
+}
+
+// Season from a timestamp (kept separate from the picture logic below).
+function seasonOf(ts) {
+  const m = new Date(ts).getMonth() + 1;
+  return m >= 3 && m <= 5
+    ? "spring"
+    : m >= 6 && m <= 8
+      ? "summer"
+      : m >= 9 && m <= 11
+        ? "autumn"
+        : "winter";
+}
+function devSeason() {
+  let q = null;
+  try {
+    q = new URLSearchParams(location.search).get("season");
+  } catch (e) {
+    /* ignore */
+  }
+  return SEASONS.includes(q)
+    ? q
+    : SEASONS.includes(DEV_SEASON)
+      ? DEV_SEASON
+      : null;
+}
+// "2026. 10. 06. 화 09:05" from the stored creation time ('' for old memos that have none).
+function formatStamp(ts) {
+  if (!Number.isFinite(ts) || ts <= 0) return "";
+  const d = new Date(ts),
+    p = (n) => String(n).padStart(2, "0");
+  return (
+    d.getFullYear() +
+    ". " +
+    p(d.getMonth() + 1) +
+    ". " +
+    p(d.getDate()) +
+    ". " +
+    "일월화수목금토"[d.getDay()] +
+    " " +
+    p(d.getHours()) +
+    ":" +
+    p(d.getMinutes())
+  );
 }
 
 // Single place where a fish object is made (new memo or restored from storage).
@@ -342,6 +575,9 @@ function buildFish(o) {
     y: o.y,
     vy: 0,
     vx: 0,
+    createdAt:
+      Number.isFinite(o.createdAt) && o.createdAt > 0 ? o.createdAt : null, // null = old memo without a stamp
+    season: SEASONS.includes(o.season) ? o.season : null, // null = drawn (vector) fish
     dir: o.dir,
     speed: o.speed,
     size: o.size,
@@ -400,8 +636,16 @@ function saveState() {
           size: f.size,
           col: f.col.toString("#rrggbb"),
           phase: f.phase,
+          createdAt: f.createdAt,
+          season: f.season,
         })),
-        bookmarks: bookmarks.map((b) => ({ id: b.id, memo: b.memo, at: b.at })),
+        bookmarks: bookmarks.map((b) => ({
+          id: b.id,
+          memo: b.memo,
+          at: b.at,
+          createdAt: b.createdAt,
+          season: b.season,
+        })),
         bookmarkCount: bookmarks.length, // informational only; never trusted on load
       }),
     );
@@ -436,6 +680,11 @@ function loadState() {
           id: b.id,
           memo: b.memo,
           at: Number.isFinite(b.at) ? b.at : 0,
+          createdAt:
+            Number.isFinite(b.createdAt) && b.createdAt > 0
+              ? b.createdAt
+              : null, // old data: no stamp, none invented
+          season: SEASONS.includes(b.season) ? b.season : null,
         });
       }
     if (Array.isArray(d.fishes))
@@ -472,6 +721,8 @@ function loadState() {
               UW.r - size / 2,
             ),
             y: baseY,
+            createdAt: o.createdAt,
+            season: o.season,
             phase: Number.isFinite(o.phase) ? o.phase : random(TWO_PI),
             state: "swimming", // everything resumes swimming
           }),
@@ -509,7 +760,7 @@ function buildResetUI() {
   resetModal = document.createElement("div");
   resetModal.id = "reset-modal";
   resetModal.innerHTML =
-    '<div class="box" role="dialog" aria-modal="true"><div>모든 메모와 양동이에 저장된 메모를 영구적으로 삭제할까요? 이 작업은 되돌릴 수 없습니다.</div>' +
+    '<div class="box" role="dialog" aria-modal="true"><div>모든 메모와 양동이에 저장된 메모를 완전히 삭제할까요? 이 작업은 되돌릴 수 없습니다.</div>' +
     '<div class="row"><button type="button" id="reset-cancel">취소</button><button type="button" id="reset-confirm" class="danger">네, 초기화</button></div></div>';
   document.body.appendChild(resetModal);
 
@@ -546,6 +797,7 @@ function resetAll() {
   toast = null;
   panelCache = {};
   nextId = 1;
+  setPreview(false);
   bucketPour = null;
   bucketPress = null;
   dumped = [];
@@ -675,7 +927,8 @@ function wrapLines(text, n, limits) {
 
 // Text area inside a fish body is an ellipse (see fishShape); computed per fish from its size.
 function computeFishFit(f) {
-  const shape = { type: "ellipse", a: 0.27 * f.size, b: 0.12 * f.size };
+  const st = fishImg(f) ? fishImg(f).st : FISH_IMG_DEFAULT; // text area of the picture (or of the drawn fish)
+  const shape = { type: "ellipse", a: st.textA * f.size, b: st.textB * f.size };
   f.fit = fitText(f.memo, shape, shape.b * 2); // fs is in the fish's local units
   const sMax = Math.min(4.2, 270 / f.size);
   const s0 = Math.min(constrain(210 / f.size, 2, 3.4), sMax);
@@ -727,11 +980,80 @@ function handPos() {
     y: SHOULDER.y + ARM_LEN * Math.sin(armPhi),
   };
 }
+// Arm pose: changes only when the pose name changes (an event), eases once, then stays exactly on the pose angle.
+let armPose = { goal: "idle", via: null, from: 0, to: 0, t: 1, ang: 0 };
+function startArmMove(to) {
+  armPose.from = armPose.ang;
+  armPose.to = FISHER.POSE[to];
+  armPose.t = 0;
+}
+function setArmPose(name) {
+  if (name === armPose.goal) return;
+  armPose.goal = name;
+  // catch -> feed first lowers the arm to the idle pose, then raises it to feed
+  if (name === "feed" && armPose.to === FISHER.POSE.catch) {
+    armPose.via = "feed";
+    startArmMove("idle");
+  } else {
+    armPose.via = null;
+    startArmMove(name);
+  }
+}
+function armPoseTarget() {
+  // derived from state, so it can only change when a state changes
+  if (throws.some((th) => !th.released)) return "feed";
+  if (
+    fishes.some(
+      (f) =>
+        f.state === "retrieving" ||
+        f.state === "caught" ||
+        f.state === "dragging",
+    )
+  )
+    return "catch";
+  return "idle";
+}
+function updateArmPose() {
+  setArmPose(armPoseTarget());
+  if (armPose.t < 1) {
+    armPose.t = Math.min(1, armPose.t + dt / FISHER.MOVE_S);
+    armPose.ang =
+      armPose.t >= 1
+        ? armPose.to
+        : lerp(armPose.from, armPose.to, easeInOut(armPose.t));
+    if (armPose.t >= 1 && armPose.via) {
+      const v = armPose.via;
+      armPose.via = null;
+      startArmMove(v);
+    } // second leg of catch -> idle -> feed
+  }
+}
+function armRot(p) {
+  // full-space point -> scene, rotated about the elbow by the current pose
+  const F = FISHER,
+    c = Math.cos(armPose.ang),
+    sn = Math.sin(armPose.ang);
+  const dx = p.x - F.ELBOW.x,
+    dy = p.y - F.ELBOW.y;
+  return fisherPt({
+    x: F.ELBOW.x + dx * c - dy * sn,
+    y: F.ELBOW.y + dx * sn + dy * c,
+  });
+}
+function fisherPt(p) {
+  const F = FISHER;
+  return {
+    x: F.DOCK_RIGHT + (p.x - F.ANCHOR.x) * F.SCALE,
+    y: DOCK_Y + (p.y - F.ANCHOR.y) * F.SCALE,
+  };
+} // full pixel space -> scene
 function rodBase() {
+  if (FISHER.ok) return armRot(FISHER.GRIP);
   const h = handPos();
   return { x: h.x - 6, y: h.y + 8 };
 }
 function rodTip() {
+  if (FISHER.ok) return armRot(FISHER.TIP); // the line starts here and follows every pose change
   const b = rodBase();
   return {
     x: b.x + ROD_LEN * Math.cos(rod.ang),
@@ -739,8 +1061,8 @@ function rodTip() {
   };
 }
 function hangAngle() {
-  return 14 * DEG + Math.sin(clock * 1.7) * 0.025;
-}
+  return 14 * DEG;
+} // tilt of a fish hanging from the hook (constant: nothing sways on its own)
 function sEff(f) {
   return Math.min(f.sCaught, Math.max(1.3, (690 - rodTip().x - 8) / f.size));
 }
@@ -796,7 +1118,8 @@ function draw() {
   splashes = splashes.filter((s) => s.t < 2.5);
 
   checkHold();
-  advanceThrows(); // advances throw clocks + arm swing
+  advanceThrows(); // advances throw clocks
+  if (FISHER.ok) updateArmPose();
   updateHook();
   updateBucket();
   updateDumped();
@@ -831,10 +1154,8 @@ function updateHook() {
     // The line length decides the hook's depth: target = tip + len. A damped spring (slightly
     // under-damped) eases the hook there, so it settles softly instead of snapping, and it
     // trails sideways a little while the line is being reeled.
-    const tx =
-      tip.x + constrain(-hook.vy * 0.02, -8, 8) + Math.sin(clock * 1.1) * 1.5;
-    const ty =
-      Math.min(tip.y + rod.len, UW.bottom - 6) + Math.sin(clock * 1.9) * 1.5;
+    const tx = tip.x + constrain(-hook.vy * 0.02, -8, 8);
+    const ty = Math.min(tip.y + rod.len, UW.bottom - 6);
     const K = 60,
       C = 12;
     hook.vx += (K * (tx - hook.x) - C * hook.vx) * dt;
@@ -850,8 +1171,8 @@ function updateHook() {
     hook.y = lerp(hook.startY, holdY, e);
   } else if (hook.mode === "hold") {
     const k = kk(10); // eases back to the rod tip (e.g. after a missed bucket drop)
-    hook.x += (tip.x + Math.sin(clock * 1.7) * 3 - hook.x) * k;
-    hook.y += (holdY + Math.sin(clock * 2.1) * 2 - hook.y) * k;
+    hook.x += (tip.x - hook.x) * k;
+    hook.y += (holdY - hook.y) * k;
   } else if (hook.mode === "drag") {
     // dragging a caught fish: the hook (and fish) follow the pointer
     const m = mouseD(),
@@ -1108,7 +1429,13 @@ function endFishDrag(f) {
 }
 
 function bookmarkFish(f) {
-  bookmarks.push({ id: f.id, memo: f.memo, at: Date.now() }); // the memo now lives in the bucket list
+  bookmarks.push({
+    id: f.id,
+    memo: f.memo,
+    at: Date.now(),
+    createdAt: f.createdAt,
+    season: f.season,
+  }); // the memo now lives in the bucket list
   f.state = "bucketed";
   f.bT = 0;
   f.b0 = { x: f.x, y: f.y, s: f.scale, r: f.rot };
@@ -1162,10 +1489,11 @@ function armPhiAt(t) {
 }
 
 function advanceThrows() {
-  armPhi = PHI0; // the arm keeps its default pose (it only swings for the bird throw)
+  armPhi = PHI0; // drawn-person fallback only: the arm keeps its default pose (it only swings for the bird throw)
   for (const th of throws) {
     th.t += dt;
-    if (th.t < T_WIND + T_SWING + T_RECOVER) armPhi = armPhiAt(th.t);
+    if (!FISHER.ok && th.t < T_WIND + T_SWING + T_RECOVER)
+      armPhi = armPhiAt(th.t); // fallback only; the pictures use setArmPose()
     // Bird: flies in from the right toward the interception point, then carries the fish away.
     const b = th.bird;
     if (!th.carry) {
@@ -1238,6 +1566,188 @@ function updateThrowFish(th) {
 /* ==========================================================================
    Bucket: pictures, pose, memo list, drag + shake
    ========================================================================== */
+// Season fish pictures: loaded ONCE at start (not per fish). A missing / broken file only logs a warning and
+// those fish keep the drawn look.
+// 몸통 사진의 dock / 의자 크림색만 새 색으로 바꿉니다. [x0, y0, x1, y1]은 사진 안 픽셀 좌표예요.
+const FISHER_RECT = { dock: [0, 735, 1104, 857], stool: [510, 515, 800, 735] };
+function recolorFisher(img) {
+  const CREAM = [244, 236, 223],
+    LINE = [14, 30, 11];
+  const d = [CREAM[0] - LINE[0], CREAM[1] - LINE[1], CREAM[2] - LINE[2]],
+    dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+  let loaded = false;
+  for (const key of ["dock", "stool"]) {
+    const hex = FISHER.COLOR[key];
+    if (!hex) continue;
+    if (!loaded) {
+      img.loadPixels();
+      loaded = true;
+    }
+    const c = color(hex),
+      T = [red(c), green(c), blue(c)],
+      [x0, y0, x1, y1] = FISHER_RECT[key];
+    for (let y = y0; y < Math.min(y1, img.height); y++)
+      for (let x = x0; x < Math.min(x1, img.width); x++) {
+        const i = 4 * (y * img.width + x);
+        if (img.pixels[i + 3] === 0) continue;
+        const r = img.pixels[i] - LINE[0],
+          g = img.pixels[i + 1] - LINE[1],
+          b = img.pixels[i + 2] - LINE[2];
+        const u = Math.min(
+          1,
+          Math.max(0, (r * d[0] + g * d[1] + b * d[2]) / dd),
+        );
+        const er = r - u * d[0],
+          eg = g - u * d[1],
+          eb = b - u * d[2];
+        if (u > 0.05 && Math.hypot(er, eg, eb) < 28)
+          for (let k = 0; k < 3; k++)
+            img.pixels[i + k] = LINE[k] + u * (T[k] - LINE[k]);
+      }
+  }
+  if (loaded) img.updatePixels();
+}
+
+function loadFisherImages() {
+  const F = FISHER;
+  loadImage(
+    F.BODY.file,
+    (a) =>
+      loadImage(
+        F.ARM.file,
+        (b) => {
+          recolorFisher(a);
+          F.img = a;
+          F.armImg = b;
+          F.ok = true;
+          if (hook.mode === "water") {
+            const t = rodTip();
+            hook.x = t.x;
+            hook.y = t.y + rod.len;
+            hook.vx = hook.vy = 0;
+          } // line start moved with the new rod
+        },
+        () => console.warn("fisher arm image missing, using drawn person"),
+      ),
+    () => {
+      FISHER.failed = true;
+      console.warn("fisher body image missing, using drawn person");
+    },
+  );
+}
+
+// Finds the inside of an outline-only fish picture: closes small gaps in the line (dilate), floods the outside from
+// the picture border, and shrinks back. Returns a white silhouette image of the same size (null on failure).
+function makeFishFill(img) {
+  const w = img.width,
+    h = img.height,
+    R = Math.max(2, Math.round(w / 160));
+  img.loadPixels();
+  const grow = (src, r) => {
+    // square dilation (separable), out-of-picture counts as 0
+    const tmp = new Uint8Array(w * h),
+      out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        let v = 0;
+        for (let k = Math.max(0, x - r); k <= Math.min(w - 1, x + r) && !v; k++)
+          v = src[y * w + k];
+        tmp[y * w + x] = v;
+      }
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        let v = 0;
+        for (let k = Math.max(0, y - r); k <= Math.min(h - 1, y + r) && !v; k++)
+          v = tmp[k * w + x];
+        out[y * w + x] = v;
+      }
+    return out;
+  };
+  const ink = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) ink[i] = img.pixels[4 * i + 3] > 110 ? 1 : 0;
+  const dil = grow(ink, R),
+    outside = new Uint8Array(w * h),
+    stack = [];
+  const push2 = (i) => {
+    if (!dil[i] && !outside[i]) {
+      outside[i] = 1;
+      stack.push(i);
+    }
+  };
+  for (let x = 0; x < w; x++) {
+    push2(x);
+    push2((h - 1) * w + x);
+  }
+  for (let y = 0; y < h; y++) {
+    push2(y * w);
+    push2(y * w + w - 1);
+  }
+  while (stack.length) {
+    const i = stack.pop(),
+      x = i % w;
+    if (x > 0) push2(i - 1);
+    if (x < w - 1) push2(i + 1);
+    if (i >= w) push2(i - w);
+    if (i < w * (h - 1)) push2(i + w);
+  }
+  const notInner = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) notInner[i] = outside[i] ? 1 : 0;
+  const shrunk = grow(notInner, R); // 1 = still outside after shrinking the inside
+  const fill = createImage(w, h);
+  fill.loadPixels();
+  for (let i = 0; i < w * h; i++) {
+    const on = !shrunk[i];
+    fill.pixels[4 * i] = fill.pixels[4 * i + 1] = fill.pixels[4 * i + 2] = 255;
+    fill.pixels[4 * i + 3] = on ? 255 : 0;
+  }
+  fill.updatePixels();
+  return fill;
+}
+
+function loadFishImages() {
+  for (const key of SEASONS) {
+    const e = FISH_IMG[key];
+    e.ready = false;
+    e.st = Object.assign({}, FISH_IMG_DEFAULT, e); // per-season overrides win over the defaults
+    try {
+      loadImage(
+        encodeURI(e.file),
+        (img) => {
+          e.img = img;
+          e.textCol = null;
+          try {
+            e.fillImg = makeFishFill(img); // inside of the outline: filled with the fish colour when caught
+          } catch (err) {
+            e.fillImg = null;
+          }
+          try {
+            // average colour of the opaque pixels -> readable text colour
+            img.loadPixels();
+            let r = 0,
+              g = 0,
+              b = 0,
+              n = 0;
+            for (let i = 0; i < img.pixels.length; i += 16)
+              if (img.pixels[i + 3] > 200) {
+                r += img.pixels[i];
+                g += img.pixels[i + 1];
+                b += img.pixels[i + 2];
+                n++;
+              }
+            if (n) e.textCol = bestTextColor(color(r / n, g / n, b / n));
+          } catch (err) {
+            /* keep the fish's own text colour */
+          }
+          e.ready = true;
+        },
+        () => console.warn("fish image not found:", e.file),
+      );
+    } catch (err) {
+      console.warn(err);
+    }
+  }
+}
+
 // Pictures load asynchronously from setup(); if one fails, the drawn bucket is used instead.
 function loadBucketImages() {
   for (const key of Object.keys(BUCKET_IMG)) {
@@ -1337,6 +1847,10 @@ function setUiLocked(b) {
   // memo input + reset button are off while the list is open
   inputEl.disabled = b;
   resetBtn.disabled = b;
+  seasonBtn.disabled = b;
+  seasonBtn.style.visibility = seasonPop.style.visibility = b
+    ? "hidden"
+    : "visible";
   inputEl.style.visibility = resetBtn.style.visibility = b
     ? "hidden"
     : "visible"; // HTML elements sit above the canvas, so hide them
@@ -1458,6 +1972,8 @@ function triggerPour() {
         // same id + memo text as the bookmark
         id: b.id,
         memo: b.memo,
+        createdAt: b.createdAt,
+        season: b.season,
         size,
         dir: random() < 0.5 ? -1 : 1,
         speed: random(18, 52),
@@ -1478,7 +1994,7 @@ function triggerPour() {
   showToast(
     water
       ? items.length + "개의 물고기를 놓아줬어요"
-      : items.length + "개의 메모를 삭제했어요",
+      : items.length + "개의 물고기를 삭제했어요",
   );
   saveState(); // land: gone for good. water: the queued fish are saved with the fish list.
 }
@@ -1569,6 +2085,13 @@ function buildListLayout() {
     const lines = wrapLines(b.memo, 400, new Array(400).fill(colW - 28)) || [
       b.memo,
     ];
+    const stamp = formatStamp(b.createdAt); // "memo ---- 2026. 10. 26. 월 16:25" (old memos: text only)
+    if (stamp) {
+      const suffix = " ---- " + stamp,
+        last = lines.length - 1;
+      if (textWidth(lines[last] + suffix) <= colW - 28) lines[last] += suffix;
+      else lines.push("---- " + stamp);
+    }
     return { lines, h: lines.length * lh + padY * 2 };
   });
   listCache = {
@@ -1866,7 +2389,7 @@ function mouseWheel(e) {
    Rendering
    ========================================================================== */
 function render() {
-  background(COL.bg);
+  background(COL.sky); // everything above the water / dock bottom
 
   const m = mouseD();
   const overFish =
@@ -1889,6 +2412,7 @@ function render() {
   push();
   translate(L.ox, L.oy);
   scale(L.u);
+  drawBelowWater(); // dark area under the dock and the (wavy) water line
   if (bucketPress && bucketPress.dragging && !listOpen) drawGuideLine(); // dock | water boundary, only while dragging
   drawPerson();
   for (const f of fishes) if (f.state === "bucketed") drawFish(f); // drawn behind the bucket: looks like it drops in
@@ -1926,7 +2450,32 @@ function render() {
   }
 }
 
+function drawFisherImages() {
+  const F = FISHER,
+    k = F.SCALE;
+  push();
+  imageMode(CORNER);
+  const o = fisherPt(F.BODY);
+  image(F.img, o.x, o.y, F.img.width * k, F.img.height * k); // static body
+  const e = fisherPt(F.ELBOW);
+  translate(e.x, e.y);
+  rotate(armPose.ang); // forearm + hands + rod: one piece about the elbow
+  image(
+    F.armImg,
+    (F.ARM.x - F.ELBOW.x) * k,
+    (F.ARM.y - F.ELBOW.y) * k,
+    F.armImg.width * k,
+    F.armImg.height * k,
+  );
+  pop();
+}
+
 function drawPerson() {
+  if (FISHER.ok) {
+    drawFisherImages();
+    return;
+  }
+  if (!FISHER.failed) return; // 사진을 불러오는 중에는 아무것도 그리지 않음
   noStroke();
   fill(COL.dock);
   rect(35, 272, 242, 14); // dock
@@ -1950,11 +2499,14 @@ function drawPerson() {
 function drawRod() {
   const b = rodBase(),
     t = rodTip();
-  stroke(COL.rod);
-  strokeWeight(8);
-  strokeCap(SQUARE);
-  line(b.x, b.y, t.x, t.y);
-  strokeCap(ROUND);
+  if (!FISHER.ok && FISHER.failed) {
+    // drawn rod only when the pictures are missing
+    stroke(COL.rod);
+    strokeWeight(8);
+    strokeCap(SQUARE);
+    line(b.x, b.y, t.x, t.y);
+    strokeCap(ROUND);
+  }
   noFill();
   stroke(138, 138, 138, 130);
   strokeWeight(1.2);
@@ -1972,6 +2524,24 @@ function drawGuideLine() {
   drawingContext.setLineDash([]); // restore: every other line is solid again
   pop();
   strokeCap(ROUND);
+}
+
+// Dark ground colour below the dock's underside and the water surface, across the whole window width.
+function drawBelowWater() {
+  const x0 = -L.ox / L.u - 2,
+    x1 = (width - L.ox) / L.u + 2,
+    yb = (height - L.oy) / L.u + 2;
+  noStroke();
+  fill(COL.bg);
+  beginShape();
+  vertex(x0, yb);
+  vertex(x0, DOCK_Y + 14);
+  vertex(WATER_X0, DOCK_Y + 14);
+  for (let x = WATER_X0; x < WATER_X1; x += 4) vertex(x, waveY(x));
+  vertex(WATER_X1, waveY(WATER_X1));
+  vertex(x1, waveY(WATER_X1));
+  vertex(x1, yb);
+  endShape(CLOSE);
 }
 
 function drawWater() {
@@ -1994,7 +2564,7 @@ function drawLineAndHook() {
   strokeWeight(1.5);
   noFill();
   const sag = constrain(hook.vy * 0.03, -14, 14); // line bows while it is being reeled
-  const cx = lerp(t.x, hx, 0.4) + 6 + Math.sin(clock * 1.3) * 3 - sag,
+  const cx = lerp(t.x, hx, 0.4) + 6 - sag,
     cy = lerp(t.y, hy, 0.55);
   bezier(t.x, t.y, cx, cy, cx, cy, hx, hy - 10); // slightly bowed line
   strokeWeight(1.8); // small J-hook: the catch point is its tip
@@ -2038,8 +2608,16 @@ function fishShape(len) {
   endShape(CLOSE);
 }
 
+// Loaded picture entry for this fish's season, or null (not loaded / failed / old memo) -> the drawn fish is used.
+function fishImg(f) {
+  const e = f.season ? FISH_IMG[f.season] : null;
+  return e && e.ready ? e : null;
+}
+
 function drawFish(f) {
-  const len = f.size;
+  const len = f.size,
+    e = fishImg(f),
+    st = e ? e.st : FISH_IMG_DEFAULT;
   push();
   translate(f.x, f.y);
   rotate(f.rot);
@@ -2049,29 +2627,75 @@ function drawFish(f) {
   const fx =
     Math.abs(f.faceX) < 0.03 ? 0.03 * (Math.sign(f.faceX) || 1) : f.faceX;
   scale(fx, 1);
-  strokeWeight(2.2 / Math.sqrt(f.scale));
-  strokeJoin(ROUND);
-  stroke(lerpColor(f.col, color(255), f.fillAmt * 0.35));
-  if (f.fillAmt > 0.01)
-    fill(red(f.fillCol), green(f.fillCol), blue(f.fillCol), 255 * f.fillAmt);
-  else noFill();
-  fishShape(len);
-  noStroke();
-  fill(lerpColor(f.col, color(COL.bg), f.fillAmt));
-  circle(0.34 * len, -0.04 * len, len * 0.045); // eye
+  if (e) {
+    // season picture (transparent PNG), never stretched
+    if (!st.facesRight) scale(-1, 1);
+    const w = len * st.width,
+      h = (w * e.img.height) / e.img.width;
+    const wet = f.state === "swimming"; // 물속에서 헤엄치는 중: 안쪽을 물색으로 채워 겹친 물고기를 가림
+    if (e.fillImg && (wet || f.fillAmt > 0.01)) {
+      // inside of the outline: same colour fill as the drawn fish gets when caught
+      if (wet)
+        tint(
+          red(color(COL.bg)),
+          green(color(COL.bg)),
+          blue(color(COL.bg)),
+          255,
+        );
+      else
+        tint(
+          red(f.fillCol),
+          green(f.fillCol),
+          blue(f.fillCol),
+          255 * f.fillAmt,
+        );
+      image(
+        e.fillImg,
+        -st.anchorX * w + st.offsetX * len,
+        -st.anchorY * h + st.offsetY * len,
+        w,
+        h,
+      );
+      noTint();
+    }
+    image(
+      e.img,
+      -st.anchorX * w + st.offsetX * len,
+      -st.anchorY * h + st.offsetY * len,
+      w,
+      h,
+    );
+  } else {
+    // fallback: the original drawn fish
+    strokeWeight(2.2 / Math.sqrt(f.scale));
+    strokeJoin(ROUND);
+    stroke(lerpColor(f.col, color(255), f.fillAmt * 0.35));
+    if (f.fillAmt > 0.01)
+      fill(red(f.fillCol), green(f.fillCol), blue(f.fillCol), 255 * f.fillAmt);
+    else noFill();
+    fishShape(len);
+    noStroke();
+    fill(lerpColor(f.col, color(COL.bg), f.fillAmt));
+    circle(0.34 * len, -0.04 * len, len * 0.045); // eye
+  }
   pop();
 
   // Memo text inside the body: only when caught and out of the water.
   if (f.textAlpha > 0.01 && f.fit) {
+    const tc = e && e.textCol && !e.fillImg ? e.textCol : f.textCol; // picture: colour chosen for contrast with its average colour
     noStroke();
-    fill(red(f.textCol), green(f.textCol), blue(f.textCol), 255 * f.textAlpha);
-    textAlign(CENTER, CENTER);
+    fill(255, 255, 255, 255 * f.textAlpha); // 항상 흰색
+    textAlign(CENTER, BASELINE); // 기준선 정렬: 브라우저 글꼴 정보와 상관없이 위치가 정확함
     textSize(f.fit.fs);
-    const cx = f.faceX * 0.075 * len,
-      cy = 0.005 * len,
+    const cx = f.faceX * st.textX * len,
+      cy = st.textY * len,
       n = f.fit.lines.length;
     for (let i = 0; i < n; i++)
-      text(f.fit.lines[i], cx, cy - (n * f.fit.lh) / 2 + (i + 0.5) * f.fit.lh);
+      text(
+        f.fit.lines[i],
+        cx,
+        cy - (n * f.fit.lh) / 2 + (i + 0.5) * f.fit.lh + f.fit.fs * 0.36,
+      );
   }
   pop();
 }
@@ -2174,7 +2798,7 @@ function drawHint() {
   const lh = fs * 1.4,
     cy = L.btn.y + L.btn.h / 2;
   noStroke();
-  fill(180);
+  fill(220);
   textAlign(CENTER, TOP);
   lines.forEach((ln, i) => text(ln, cx, cy - (lines.length * lh) / 2 + i * lh));
 }
@@ -2211,7 +2835,7 @@ function drawBucket() {
   }
   pop();
   noStroke();
-  fill(n >= MAX_BM ? "#E8D95A" : "#DCDCDC");
+  fill(n >= MAX_BM ? "#b9b05c" : "#6e6d6d");
   textAlign(CENTER, BOTTOM);
   textSize(BUCKET_LABEL_FS * bucket.sc);
   text(n + "/" + MAX_BM, bucket.x, bucket.y - bucketTopOffset(n) * bucket.sc); // label above, never on the picture
@@ -2261,7 +2885,7 @@ function drawToast() {
       bh = lines.length * lh + S.pad * 2;
     const bx = constrain(A.x - bw / 2, 8, Math.max(8, width - bw - 8));
     const by = constrain(A.y - bh / 2, 8, Math.max(8, height - bh - 8));
-    fill(31, 31, 31, 235 * a);
+    fill(255, 255, 255, 235 * a);
     stroke(232, 217, 90, 255 * a);
     strokeWeight(1.5);
     rect(bx, by, bw, bh);
@@ -2278,6 +2902,6 @@ function drawToast() {
   const hw = textWidth(toast.msg) / 2;
   const x = constrain(p.x, 8 + hw, Math.max(8 + hw, width - 8 - hw));
   noStroke();
-  fill(232, 217, 90, 255 * a);
+  fill(161, 148, 42, 255 * a);
   text(toast.msg, x, p.y);
 }
