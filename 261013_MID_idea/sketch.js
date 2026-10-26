@@ -58,7 +58,7 @@ const BUCKET = {
 // Dashed drop-zone frame around the bucket. It is centred on the bucket (BUCKET.mouthX), so left/right are symmetric.
 // halfW = half the frame width; padTop = gap above the "n/10" label; padBottom = how far below the bucket base it reaches.
 const ZONE_STYLE = { halfW: 34, padTop: 12, padBottom: 6 };
-const BUCKET_LABEL_FS = 8; // font size of the "n/10" label (design units; scales with the bucket)
+const BUCKET_LABEL_FS = 11; // font size of the "n/10" label (design units; scales with the bucket)
 const RIM_W = BUCKET.w + 4; // displayed width of the bucket rim (pictures are scaled to this)
 const WATER_X0 = 277; // where the dock ends and the water begins
 const WATER_X1 = 686; // right end of the water line (drawWater); the input box lines up with it
@@ -154,6 +154,9 @@ function setup() {
   hook.x = t.x;
   hook.y = t.y + rod.len;
   window.addEventListener("pagehide", saveState);
+  window.addEventListener("contextmenu", (ev) => {
+    if (ev.target && ev.target.tagName === "CANVAS") ev.preventDefault();
+  }); // no long-press menu on the canvas
 }
 
 function windowResized() {
@@ -274,7 +277,8 @@ function placeInput() {
   s.top = r.y + "px";
   s.width = r.w + "px";
   s.height = r.h + "px";
-  s.fontSize = Math.max(14, Math.min(20, r.h * 0.45)) + "px";
+  // (iOS Safari zooms the page when an input's font is under 16px, so 16 is the minimum)
+  s.fontSize = Math.max(16, Math.min(20, r.h * 0.45)) + "px";
   if (resetBtn) {
     const b = L.btn,
       bs = resetBtn.style;
@@ -1642,7 +1646,7 @@ function drawListPanel() {
     w = width - 24,
     h = height - 24; // thin frame 12px inside the window edge
   noStroke();
-  fill(31, 31, 31, 240 * a);
+  fill(31, 31, 31, 250 * a);
   rect(0, 0, width, height); // covers the whole window (top to bottom)
   noFill();
   stroke(220, 220, 220, 200 * a);
@@ -1817,6 +1821,35 @@ function mouseReleased() {
     press = null; // (after a throw, nothing else happens)
   }
   drag = null;
+}
+
+/* ==========================================================================
+   Touch input (phones / tablets).
+   Phones only synthesize mouse events for a quick TAP (mousedown + mouseup together, after the finger lifts) and
+   never for dragging or holding, so mousePressed/mouseDragged/mouseReleased don't see those gestures.
+   These handlers forward real touch events to the same mouse functions, so one code path serves both.
+   Returning false stops the browser's scroll/zoom and its emulated mouse events (no double firing).
+   Touches that start on the input box or the reset button are left alone.
+   ========================================================================== */
+let touchActive = false;
+function touchStarted(e) {
+  if (!e || !e.target || e.target.tagName !== "CANVAS") return; // input / button: normal behaviour
+  if (touchActive || (e.touches && e.touches.length > 1)) return false; // ignore a second finger
+  touchActive = true;
+  mousePressed(e);
+  return false;
+}
+function touchMoved(e) {
+  if (!touchActive) return;
+  mouseDragged(e);
+  return false;
+}
+function touchEnded(e) {
+  if (!touchActive) return;
+  if (e && e.touches && e.touches.length > 0) return false; // another finger still down
+  touchActive = false;
+  mouseReleased(e);
+  return false;
 }
 
 function mouseWheel(e) {
