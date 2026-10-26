@@ -28,7 +28,10 @@ const FISH_PALETTE = [
   "#3B4FD8",
 ];
 
-const WATER_Y = 272; // mean water surface
+const DOCK_Y = 272; // top surface of the dock (where things sit)
+// Mean water surface. The waves rise 8.5 units and the line is 6 thick (+3), so the highest edge of the water
+// is WATER_Y - 11.5. Using DOCK_Y + 12 keeps that highest point at or below the dock's top surface.
+const WATER_Y = DOCK_Y + 12;
 const UW = { l: 24, r: 682, top: 308, bottom: 428 }; // underwater swimming area
 
 // Person / rod geometry (design units)
@@ -52,8 +55,27 @@ const BUCKET = {
   mouthY: 222,
   zone: { x: 24, y: 180, w: 84, h: 100 },
 };
+// Dashed drop-zone frame around the bucket. It is centred on the bucket (BUCKET.mouthX), so left/right are symmetric.
+// halfW = half the frame width; padTop = gap above the "n/10" label; padBottom = how far below the bucket base it reaches.
+const ZONE_STYLE = { halfW: 34, padTop: 12, padBottom: 6 };
+const BUCKET_LABEL_FS = 8; // font size of the "n/10" label (design units; scales with the bucket)
 const RIM_W = BUCKET.w + 4; // displayed width of the bucket rim (pictures are scaled to this)
 const WATER_X0 = 277; // where the dock ends and the water begins
+const WATER_X1 = 686; // right end of the water line (drawWater); the input box lines up with it
+const RESET_MARGIN = 16; // reset button: distance from the browser window's right / bottom edge
+// Dashed vertical guide (dock | water boundary) shown only while the bucket is being dragged.
+// dash = [dash length, gap length] in design units.
+const GUIDE_LINE = { color: "#888888", weight: 1.5, dash: [5, 5] };
+// Two-line hint above the n/10 label while the memo list is open.
+const BUCKET_NOTE = [
+  "데크 위에서 흔들기: 메모 삭제",
+  "물 위에서 흔들기: 메모 방생",
+];
+// "Bucket is full" toast: drawn on a dark plate in the memo-text area (position: toastAnchor()).
+// Distance (design units) from the water's mean surface up to the bottom of the pour / release message.
+// The waves rise ~11 units, so 16 leaves a visible gap above the crests.
+const TOAST_WATER_GAP = 16;
+const TOAST_STYLE = { size: 16, pad: 12, maxW: 340 };
 // Bucket pictures by number of bookmarks. 0–2 memos keep using the drawn bucket (no picture yet).
 const BUCKET_IMG = {
   mid: { file: "assets/bucket_mid.png" }, // 3–5 memos
@@ -153,10 +175,15 @@ function computeLayout() {
       x: 20,
       y: L.sceneH + 6,
       w: width - 40,
-      h: Math.max(60, height - L.sceneH - 52),
+      h: Math.max(60, height - L.sceneH - 64),
     };
-    L.btn = { x: width - 12 - 76, y: 10, w: 76, h: 38 };
-    L.input = { x: 12, y: 10, w: width - 24 - 76 - 8, h: 38 };
+    L.btn = {
+      x: width - RESET_MARGIN - 76,
+      y: height - RESET_MARGIN - 38,
+      w: 76,
+      h: 38,
+    };
+    L.input = { x: 12, y: 10, w: width - 24 - 76 - 8, h: 38 }; // portrait layout unchanged
   } else {
     // Wide: scene on the left ~64%, memo text in the empty space on the right.
     L.sceneW = width * 0.64;
@@ -169,16 +196,18 @@ function computeLayout() {
       w: Math.max(80, width - L.sceneW - 50),
       h: height * 0.64,
     };
-    const ih = Math.max(30, 30 * L.u),
-      bw = Math.max(64, 56 * L.u),
-      iw = Math.max(120, 250 * L.u - bw - 8);
-    L.input = {
-      x: L.ox + 685 * L.u - bw - 8 - iw,
-      y: L.oy + 10 * L.u,
-      w: iw,
-      h: ih,
-    };
-    L.btn = { x: L.ox + 685 * L.u - bw, y: L.input.y, w: bw, h: ih }; // reset button right next to the input
+    // Input: same left edge as before (design x 435), right edge = right end of the water line
+    // (WATER_X1 plus half of the 6-unit round-capped stroke), converted with the current scale/offset.
+    const ih = Math.max(30, 30 * L.u);
+    const right = L.ox + (WATER_X1 + 3) * L.u;
+    const iw = Math.max(120, right - (L.ox + 435 * L.u));
+    L.input = { x: right - iw, y: L.oy + 10 * L.u, w: iw, h: ih };
+    L.btn = {
+      x: width - RESET_MARGIN - 76,
+      y: height - RESET_MARGIN - 38,
+      w: 76,
+      h: 38,
+    }; // bottom-right of the window
   }
 }
 
@@ -249,8 +278,11 @@ function placeInput() {
   if (resetBtn) {
     const b = L.btn,
       bs = resetBtn.style;
-    bs.left = b.x + "px";
-    bs.top = b.y + "px";
+    // Pinned to the browser window with CSS (not to the canvas / design coordinates), so it stays put on resize.
+    bs.left = "auto";
+    bs.top = "auto";
+    bs.right = RESET_MARGIN + "px";
+    bs.bottom = RESET_MARGIN + "px";
     bs.width = b.w + "px";
     bs.height = b.h + "px";
     bs.fontSize = s.fontSize;
@@ -1052,7 +1084,7 @@ function startFishDrag(p) {
 function endFishDrag(f) {
   if (f.state !== "dragging") return;
   const m = mouseD(),
-    z = BUCKET.zone;
+    z = bucketZone();
   const inZone =
     m.x >= z.x && m.x <= z.x + z.w && m.y >= z.y && m.y <= z.y + z.h;
   if (!inZone) {
@@ -1063,7 +1095,10 @@ function endFishDrag(f) {
   if (bookmarks.length < MAX_BM) bookmarkFish(f);
   else {
     // full: nothing is lost, fish returns to the water
-    showToast("양동이가 가득 찼어요 (" + bookmarks.length + "/" + MAX_BM + ")");
+    showToast(
+      "양동이가 가득 찼어요 (" + bookmarks.length + "/" + MAX_BM + ")",
+      "panel",
+    );
     releaseFish(f, 330 + random(0, 120));
   }
 }
@@ -1080,9 +1115,9 @@ function bookmarkFish(f) {
   saveState(); // fish is excluded (bucketed), bookmark list is saved
 }
 
-function showToast(msg) {
-  toast = { msg, t: 0 };
-}
+function showToast(msg, place) {
+  toast = { msg, t: 0, place: place || "bucket" };
+} // place: 'bucket' (default, near the bucket) | 'panel'
 
 /* ==========================================================================
    Interaction B: hold 2s -> throw to a bird
@@ -1298,7 +1333,9 @@ function setUiLocked(b) {
   // memo input + reset button are off while the list is open
   inputEl.disabled = b;
   resetBtn.disabled = b;
-  inputEl.style.opacity = resetBtn.style.opacity = b ? "0.35" : "1";
+  inputEl.style.visibility = resetBtn.style.visibility = b
+    ? "hidden"
+    : "visible"; // HTML elements sit above the canvas, so hide them
   if (b) inputEl.blur();
 }
 function openList() {
@@ -1461,7 +1498,7 @@ function emitPoured(P, f) {
     fishes.push(f);
   } else {
     f.scale = 0.55;
-    const floor = WATER_Y - 3 - f.size * 0.06,
+    const floor = DOCK_Y - 3 - f.size * 0.06,
       vy0 = -random(20, 80),
       H = Math.max(10, floor - my);
     const tf = (-vy0 + Math.sqrt(vy0 * vy0 + 2 * G_RELEASE * H)) / G_RELEASE;
@@ -1541,15 +1578,73 @@ function buildListLayout() {
   return listCache;
 }
 
+// px y of the top of the "n/10" label for a bucket whose base is at design y `by` with scale `sc`.
+// Drop zone in design units. Its top is computed from the same numbers drawBucket() uses for the "n/10" label
+// (base - bucketTopOffset(n) - label height), so the number is always inside the frame, whichever picture is shown.
+function bucketZone() {
+  const base = BUCKET.y + BUCKET.h,
+    cx = BUCKET.mouthX;
+  const top =
+    base -
+    bucketTopOffset(bookmarks.length) -
+    BUCKET_LABEL_FS * 1.15 -
+    ZONE_STYLE.padTop;
+  return {
+    x: cx - ZONE_STYLE.halfW,
+    y: top,
+    w: ZONE_STYLE.halfW * 2,
+    h: base + ZONE_STYLE.padBottom - top,
+  };
+}
+
+function bucketLabelTopPx(by, sc, n) {
+  return (
+    L.oy +
+    (by - bucketTopOffset(n) * sc) * L.u -
+    BUCKET_LABEL_FS * sc * L.u * 1.15
+  );
+}
+
+function listNoteMetrics() {
+  // font shrinks on narrow screens so the lines are never cut off
+  let fs = 15;
+  textSize(fs);
+  while (
+    fs > 10 &&
+    Math.max(...BUCKET_NOTE.map((t) => textWidth(t))) > width - 32
+  ) {
+    fs -= 1;
+    textSize(fs);
+  }
+  return { fs, lh: fs * 1.5, h: fs * 1.5 * BUCKET_NOTE.length };
+}
+
+function drawBucketNote() {
+  // only while the list is open
+  if (!listOpen) return;
+  const a = smooth(0.4, 1, listSlide),
+    mt = listNoteMetrics();
+  const bottom = bucketLabelTopPx(bucket.y, bucket.sc, bookmarks.length) - 8; // above n/10
+  noStroke();
+  fill(180, 180, 180, 255 * a);
+  textAlign(CENTER, BOTTOM);
+  textSize(mt.fs);
+  BUCKET_NOTE.forEach((ln, i) =>
+    text(ln, bucketCenterPx(), bottom - (BUCKET_NOTE.length - 1 - i) * mt.lh),
+  );
+}
+
 function drawListPanel() {
   const a = smooth(0, 0.6, listSlide);
   if (a <= 0.01) return;
-  const top = L.input.y + L.input.h + 12,
+  const top = 12,
     left = 12,
     w = width - 24,
-    h = height - top - 12;
+    h = height - 24; // thin frame 12px inside the window edge
   noStroke();
-  fill(31, 31, 31, 245 * a);
+  fill(31, 31, 31, 240 * a);
+  rect(0, 0, width, height); // covers the whole window (top to bottom)
+  noFill();
   stroke(220, 220, 220, 200 * a);
   strokeWeight(1.5);
   rect(left, top, w, h);
@@ -1559,7 +1654,7 @@ function drawListPanel() {
   const lp = listPose(),
     n = bookmarks.length;
   const bucketTopPx =
-    L.oy + lp.y * L.u - bucketTopOffset(n) * lp.sc * L.u - 22 * lp.sc; // incl. the n/10 label
+    bucketLabelTopPx(lp.y, lp.sc, n) - 8 - listNoteMetrics().h; // list ends above the n/10 label + the 2-line note
   const viewTop = top + 40,
     viewBottom = Math.max(viewTop + 40, bucketTopPx - 16),
     viewH = viewBottom - viewTop;
@@ -1568,7 +1663,7 @@ function drawListPanel() {
   noStroke();
   fill(119, 119, 119, 255 * a);
   textAlign(CENTER, TOP);
-  textSize(13);
+  textSize(16);
   text("양동이를 다시 누르면 닫혀요", cx, top + 14);
 
   const x1 = cx - lay.colW / 2,
@@ -1583,7 +1678,7 @@ function drawListPanel() {
     textSize(16);
     text("양동이가 비어 있어요", cx, (viewTop + viewBottom) / 2 - 12);
     fill(105, 105, 105, 255 * a);
-    textSize(13);
+    textSize(16);
     text(
       "낚은 물고기를 양동이로 끌어다 놓으면 메모가 보관돼요",
       cx,
@@ -1761,6 +1856,7 @@ function render() {
   push();
   translate(L.ox, L.oy);
   scale(L.u);
+  if (bucketPress && bucketPress.dragging && !listOpen) drawGuideLine(); // dock | water boundary, only while dragging
   drawPerson();
   for (const f of fishes) if (f.state === "bucketed") drawFish(f); // drawn behind the bucket: looks like it drops in
   if (listSlide <= 0.003) drawBucket(); // while the list is open the bucket is drawn above the panel instead
@@ -1793,6 +1889,7 @@ function render() {
     scale(L.u);
     drawBucket();
     pop();
+    drawBucketNote();
   }
 }
 
@@ -1831,6 +1928,19 @@ function drawRod() {
   circle(t.x, t.y, 16); // drag handle hint at the tip
 }
 
+function drawGuideLine() {
+  push();
+  noFill();
+  stroke(GUIDE_LINE.color);
+  strokeWeight(GUIDE_LINE.weight);
+  strokeCap(SQUARE); // p5's SQUARE = butt caps: dash / gap lengths stay exact
+  drawingContext.setLineDash(GUIDE_LINE.dash);
+  line(WATER_X0, 0, WATER_X0, DH); // x of the real dock/water boundary, full scene height
+  drawingContext.setLineDash([]); // restore: every other line is solid again
+  pop();
+  strokeCap(ROUND);
+}
+
 function drawWater() {
   noFill();
   stroke(COL.water);
@@ -1838,7 +1948,8 @@ function drawWater() {
   strokeCap(ROUND);
   strokeJoin(ROUND);
   beginShape();
-  for (let x = 277; x <= 686; x += 4) vertex(x, waveY(x));
+  for (let x = WATER_X0; x < WATER_X1; x += 4) vertex(x, waveY(x));
+  vertex(WATER_X1, waveY(WATER_X1)); // end exactly at WATER_X1
   endShape();
 }
 
@@ -1995,6 +2106,8 @@ function drawMemoPanel() {
   for (let i = 0; i < n; i++) text(fit.lines[i], x, y0 + (i + 0.5) * fit.lh);
 }
 
+// Hint text is centred on the window and vertically centred with the reset button (bottom-right).
+// It shrinks / wraps (max 3 lines) to the space left of the button, so it is never hidden behind the button or cut off.
 function drawHint() {
   if (listSlide > 0.003) return;
   let msg;
@@ -2009,12 +2122,28 @@ function drawHint() {
   else if (!activeFish)
     msg = "낚싯대를 위아래로 드래그해 낚싯줄 길이를 조절하세요.";
   else return;
+  // Centred on the window; the reset button stays at the bottom-right corner. The text may extend
+  // symmetrically from the window centre only as far as the button's left edge (minus a 12px gap).
+  const cx = width / 2,
+    aw = 2 * (L.btn.x - 12 - cx);
+  if (aw < 60) return;
+  let fs = 16,
+    lines = null;
+  for (; fs >= 11 && !lines; fs--) {
+    textSize(fs);
+    lines = wrapLines(msg, 3, [aw, aw, aw]);
+  }
+  if (!lines) {
+    fs = 11;
+    textSize(fs);
+    lines = [msg];
+  }
+  const lh = fs * 1.4,
+    cy = L.btn.y + L.btn.h / 2;
   noStroke();
-  fill(119);
-  textSize(14);
-  textAlign(CENTER, BOTTOM);
-  const w = L.narrow ? width - 32 : L.sceneW - 32;
-  text(msg, 16, height - 62, w, 46);
+  fill(180);
+  textAlign(CENTER, TOP);
+  lines.forEach((ln, i) => text(ln, cx, cy - (lines.length * lh) / 2 + i * lh));
 }
 
 function toPx(dx, dy) {
@@ -2051,30 +2180,70 @@ function drawBucket() {
   noStroke();
   fill(n >= MAX_BM ? "#E8D95A" : "#DCDCDC");
   textAlign(CENTER, BOTTOM);
-  textSize(13 * bucket.sc);
+  textSize(BUCKET_LABEL_FS * bucket.sc);
   text(n + "/" + MAX_BM, bucket.x, bucket.y - bucketTopOffset(n) * bucket.sc); // label above, never on the picture
   if (activeFish && activeFish.state === "dragging") {
-    const z = B.zone,
+    const z = bucketZone(),
       m = mouseD();
     const inside =
       m.x >= z.x && m.x <= z.x + z.w && m.y >= z.y && m.y <= z.y + z.h;
+    push(); // keep the dash / stroke state local to this frame
     drawingContext.setLineDash([6, 5]);
     noFill();
     stroke(204, 196, 68, inside ? 255 : 140);
     strokeWeight(1.5);
     rect(z.x, z.y, z.w, z.h, 6);
     drawingContext.setLineDash([]);
+    pop();
   }
+}
+
+// Where the 'panel' toast is centred (px): the middle of the memo-text area — landscape: right of the scene,
+// portrait: below the scene. That area is empty while a fish is being dropped into the bucket.
+function toastAnchor() {
+  const P = L.panel;
+  return {
+    x: P.x + P.w / 2,
+    y: P.y + P.h * 0.5,
+    maxW: Math.min(P.w, TOAST_STYLE.maxW),
+  };
 }
 
 function drawToast() {
   // short feedback, e.g. when the bucket is full
   if (!toast) return;
   const a = constrain((2.4 - toast.t) / 0.6, 0, 1);
-  const p = toPx(BUCKET.x, BUCKET.y - 38);
-  textSize(14);
-  textAlign(LEFT, BOTTOM);
-  const x = constrain(p.x, 8, Math.max(8, width - textWidth(toast.msg) - 8));
+  if (toast.place === "panel") {
+    // dark plate + yellow text: readable on any background
+    const A = toastAnchor(),
+      S = TOAST_STYLE,
+      lh = S.size * 1.4;
+    textSize(S.size);
+    const lines = wrapLines(
+      toast.msg,
+      6,
+      new Array(6).fill(A.maxW - S.pad * 2),
+    ) || [toast.msg];
+    const bw = Math.max(...lines.map((l) => textWidth(l))) + S.pad * 2,
+      bh = lines.length * lh + S.pad * 2;
+    const bx = constrain(A.x - bw / 2, 8, Math.max(8, width - bw - 8));
+    const by = constrain(A.y - bh / 2, 8, Math.max(8, height - bh - 8));
+    fill(31, 31, 31, 235 * a);
+    stroke(232, 217, 90, 255 * a);
+    strokeWeight(1.5);
+    rect(bx, by, bw, bh);
+    noStroke();
+    fill(232, 217, 90, 255 * a);
+    textAlign(CENTER, TOP);
+    lines.forEach((l, i) => text(l, bx + bw / 2, by + S.pad + i * lh));
+    return;
+  }
+  // Pour / release messages: centred over the water, just above the wave crests (never touching the line).
+  const p = toPx((WATER_X0 + WATER_X1) / 2, WATER_Y - TOAST_WATER_GAP);
+  textSize(16);
+  textAlign(CENTER, BOTTOM);
+  const hw = textWidth(toast.msg) / 2;
+  const x = constrain(p.x, 8 + hw, Math.max(8 + hw, width - 8 - hw));
   noStroke();
   fill(232, 217, 90, 255 * a);
   text(toast.msg, x, p.y);
