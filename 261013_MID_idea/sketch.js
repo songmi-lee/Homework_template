@@ -100,6 +100,8 @@ const DEV_SEASON = null;
 const FISH_IMG = {
   spring: {
     file: "assets/fish-spring.png",
+    mouthU: 0.0105,
+    mouthV: 0.529,
     width: 0.85,
     textX: 0.095,
     textY: 0,
@@ -108,6 +110,8 @@ const FISH_IMG = {
   },
   summer: {
     file: "assets/fish-summer.png",
+    mouthU: 0.0094,
+    mouthV: 0.584,
     width: 1.0,
     textX: 0.089,
     textY: 0.01,
@@ -116,6 +120,8 @@ const FISH_IMG = {
   },
   autumn: {
     file: "assets/fish-autumn.png",
+    mouthU: 0.0107,
+    mouthV: 0.574,
     width: 1.0,
     textX: 0.1,
     textY: 0.028,
@@ -124,6 +130,8 @@ const FISH_IMG = {
   },
   winter: {
     file: "assets/fish-winter.png",
+    mouthU: 0.0089,
+    mouthV: 0.541,
     width: 1.05,
     textX: 0.154,
     textY: 0.058,
@@ -138,6 +146,8 @@ const FISH_IMG_DEFAULT = {
   anchorY: 0.5, // which point of the picture (0..1) sits on the fish centre
   offsetX: 0,
   offsetY: 0, // extra shift, in units of `size`
+  mouthU: 0.01,
+  mouthV: 0.55, // 입 끝 위치(그림 왼쪽/위에서 0~1): 이 점이 바늘에 걸림
   facesRight: false, // false: the pictures are drawn with the head on the left (all four are)
   textX: 0.075,
   textY: 0.005, // where the memo text is centred while caught (units of `size`)
@@ -199,6 +209,8 @@ let bucket = {
 }; // current pose; pivot = bottom centre
 let preview = { on: false, season: "spring" }; // calendar preview mode (one-shot)
 let seasonBtn, seasonPop;
+let titleEl; // the title above the memo box
+let bucketAway = false; // true after a drag was released away from the dock: the clang plays once when it is home again
 let bucketPress = null; // press on the bucket: click (toggle list) or drag (move / shake)
 let bucketPour = null; // running "empty the bucket" animation
 let dumped = []; // fish spilled on the dock (visual only; their memos are already deleted)
@@ -234,6 +246,7 @@ function setup() {
   textFont("sans-serif");
   setupInput();
   buildResetUI();
+  buildSoundUI(); // sound on/off button (audio itself starts at the first click / key)
   buildSeasonUI();
   computeLayout();
   placeInput();
@@ -261,16 +274,37 @@ function windowResized() {
 // so the rod tip can rise above the dock without covering the text box. Change this one number to move it.
 const SCENE_DROP = 24;
 
+// 제목 (메모 입력창 바로 위, 왼쪽 정렬). 글꼴 / 크기 / 색 / 굵기는 여기서 바꾸세요.
+//  font: CSS font-family. 예) '"Georgia", serif'  '"Playfair Display", serif'  '"Pretendard", sans-serif'
+//        (Google Fonts 같은 웹폰트는 index.html <head>에 <link>를 먼저 넣어야 보여요)
+//  size: 한 줄의 글자 크기(px)   weight: 400(보통) ~ 900(가장 굵게)   lineHeight: 줄 간격 배수
+//  gap: 제목과 입력창 사이 간격(px)   color: 글자색
+const TITLE = {
+  lines: ["Fishful", "Thinking"],
+  font: '"Georgia", "Times New Roman", serif',
+  size: 34,
+  weight: 800,
+  color: "#1f416c",
+  lineHeight: 1.05,
+  gap: 8,
+};
+function titleH() {
+  return TITLE.lines.length * TITLE.size * TITLE.lineHeight; // height of the title text block (px)
+}
+
 function computeLayout() {
   L.narrow = width < 760 || width / height < 1.1;
   if (L.narrow) {
     // Phone/portrait: input on top, scene below it, memo text under the scene.
     L.u = Math.max(
       0.3,
-      Math.min(width / DW, (height * 0.62 - 66) / (DH + SCENE_DROP)),
+      Math.min(
+        width / DW,
+        (height * 0.62 - 66 - titleH() - TITLE.gap) / (DH + SCENE_DROP),
+      ),
     );
     L.ox = (width - DW * L.u) / 2;
-    L.oy = 58 + SCENE_DROP * L.u;
+    L.oy = 58 + titleH() + TITLE.gap + SCENE_DROP * L.u; // (the title sits above the input, so everything moves down by its height)
     L.sceneH = L.oy + DH * L.u + 8;
     L.panel = {
       x: 20,
@@ -284,7 +318,12 @@ function computeLayout() {
       w: 76,
       h: 38,
     };
-    L.input = { x: 12, y: 10, w: width - 24 - 76 - 8, h: 38 }; // portrait layout unchanged
+    L.input = {
+      x: 12,
+      y: 10 + titleH() + TITLE.gap,
+      w: width - 24 - 76 - 8,
+      h: 38,
+    };
   } else {
     // Wide: scene on the left ~64%, memo text in the empty space on the right.
     L.sceneW = width * 0.64;
@@ -303,7 +342,13 @@ function computeLayout() {
     const ih = Math.max(30, 30 * L.u);
     const right = L.ox + (WATER_X1 + 3) * L.u;
     const iw = Math.max(120, right - (L.ox + 435 * L.u));
-    L.input = { x: right - iw, y: oy0 + 10 * L.u, w: iw, h: ih };
+    // the title needs room above the input: if the window is too short, the input moves down by just enough
+    L.input = {
+      x: right - iw,
+      y: Math.max(oy0 + 10 * L.u, titleH() + TITLE.gap + 10),
+      w: iw,
+      h: ih,
+    };
     L.btn = {
       x: width - RESET_MARGIN - 76,
       y: height - RESET_MARGIN - 38,
@@ -335,6 +380,20 @@ function setupInput() {
     zIndex: "10",
     display: "block",
   });
+  titleEl = document.createElement("div");
+  titleEl.id = "page-title";
+  titleEl.textContent = TITLE.lines.join("\n");
+  Object.assign(titleEl.style, {
+    position: "fixed",
+    whiteSpace: "pre",
+    textAlign: "left",
+    pointerEvents: "none",
+    userSelect: "none",
+    margin: "0",
+    padding: "0",
+    zIndex: "9",
+  });
+  document.body.appendChild(titleEl);
   inputEl.maxLength = 200;
   inputEl.placeholder = "Write a thought, press Enter";
   inputEl.autocomplete = "off";
@@ -448,6 +507,16 @@ function placeInput() {
   s.top = r.y + "px";
   s.width = r.w + "px";
   s.height = r.h + "px";
+  if (titleEl) {
+    const t = titleEl.style;
+    t.left = r.x + "px";
+    t.top = r.y - TITLE.gap - titleH() + "px"; // bottom of the title = TITLE.gap above the input
+    t.fontFamily = TITLE.font;
+    t.fontSize = TITLE.size + "px";
+    t.fontWeight = TITLE.weight;
+    t.color = TITLE.color;
+    t.lineHeight = TITLE.lineHeight;
+  }
   // (iOS Safari zooms the page when an input's font is under 16px, so 16 is the minimum)
   s.fontSize = Math.max(16, Math.min(20, r.h * 0.45)) + "px";
   if (seasonBtn) {
@@ -474,6 +543,17 @@ function placeInput() {
     bs.width = b.w + "px";
     bs.height = b.h + "px";
     bs.fontSize = s.fontSize;
+    if (soundBtn) {
+      // sound toggle: just left of the reset button, same height / font
+      const ss2 = soundBtn.style;
+      ss2.left = "auto";
+      ss2.top = "auto";
+      ss2.right = RESET_MARGIN + b.w + 8 + "px";
+      ss2.bottom = RESET_MARGIN + "px";
+      ss2.width = Math.round(b.w * 1.35) + "px";
+      ss2.height = b.h + "px";
+      ss2.fontSize = s.fontSize;
+    }
   }
 }
 
@@ -800,6 +880,7 @@ function resetAll() {
   setPreview(false);
   bucketPour = null;
   bucketPress = null;
+  bucketAway = false;
   dumped = [];
   if (listOpen) closeList();
   bucket.x = BUCKET.mouthX;
@@ -1225,8 +1306,24 @@ function hookFish(f) {
 function hangPose(f, theta, s, w) {
   f.faceX += (-1 - f.faceX) * kk(9); // turn to face left so it hangs from the mouth
   f.scale = s;
-  const tx = hook.x - (Math.cos(theta) * f.faceX * f.size * s) / 2;
-  const ty = hook.y - (Math.sin(theta) * f.faceX * f.size * s) / 2;
+  // The fish's mouth point (in the fish's local frame, mirrored by faceX) must sit on the hook tip.
+  let mx = (f.faceX * f.size) / 2,
+    my = 0;
+  const e = fishImg(f);
+  if (e) {
+    const st = e.st,
+      pw = f.size * st.width,
+      ph = (pw * e.img.height) / e.img.width;
+    mx =
+      -f.faceX *
+      ((st.mouthU - st.anchorX) * pw + st.offsetX * f.size) *
+      (st.facesRight ? -1 : 1);
+    my = (st.mouthV - st.anchorY) * ph + st.offsetY * f.size;
+  }
+  const c = Math.cos(theta),
+    sn = Math.sin(theta);
+  const tx = hook.x - s * (c * mx - sn * my);
+  const ty = hook.y - s * (sn * mx + c * my);
   if (w < 1) {
     // blend from where the fish was when it bit
     f.x = lerp(f.p0.x, tx, w);
@@ -1266,6 +1363,7 @@ function updateFish(f) {
     f.textAlpha = 0;
     if (f.y > waveY(f.x)) {
       addSplash(f.x);
+      sfx("pop"); // sound A: new memo drops into the water
       f.vy *= 0.35;
       f.state = "swimming";
     }
@@ -1304,6 +1402,9 @@ function updateFish(f) {
     if (f.vy > 0 && f.y > waveY(f.x) + 6) {
       // landed: swim away from the hook
       addSplash(f.x);
+      if (f.sfxRel === "pour")
+        sfx("splashPour", Math.random() * 0.04); // sound C: bucket released into the water (one per fish)
+      else sfx("splashOne"); // sound B: one fish released
       f.state = "swimming";
       f.dir = sg;
       f.vy *= 0.3;
@@ -1324,6 +1425,8 @@ function updateFish(f) {
     if (f.hookedT >= 0.4) {
       f.state = "retrieving";
       f.retrieveT = 0;
+      sfx("reel"); // sound D1: reel ticks (a real catch only)
+      if (SND.ctx) SND.reelEnd = SND.ctx.currentTime + 0.6;
       hook.mode = "retrieve";
       hook.startX = hook.x;
       hook.startY = hook.y;
@@ -1334,7 +1437,15 @@ function updateFish(f) {
     const e = easeInOut(f.retrieveT);
     hangPose(f, hangAngle() * e, lerp(1, sEff(f), smooth(0.1, 0.9, e)), 1);
     updateTextAlpha(f);
+    if (!f.sfxSurf && f.y < waveY(f.x) - 2) {
+      f.sfxSurf = true; // once per catch
+      sfxAfterReel("splashBig"); // sound D2: fish breaks the surface (after the reel ticks)
+    }
     if (f.retrieveT >= 1) {
+      if (!f.sfxSurf) {
+        f.sfxSurf = true;
+        sfxAfterReel("splashBig");
+      }
       f.state = "caught";
       hook.mode = "hold";
     }
@@ -1377,6 +1488,7 @@ function updateFish(f) {
 function releaseFish(f, landXOverride) {
   if (f.state !== "caught" && f.state !== "dragging") return;
   f.state = "released";
+  f.sfxRel = "one"; // sound B plays when it lands in the water
   f.textAlpha = 0; // memo disappears immediately
   const dir = f.x < 500 ? 1 : -1;
   const landX = constrain(
@@ -1443,6 +1555,7 @@ function bookmarkFish(f) {
   hook.mode = "water";
   hook.lockUntil = millis() + 1200;
   bucketPulse = 1;
+  sfx("plopBucket", 0.25); // sound H: the fish drops into the bucket (when it reaches the mouth)
   saveState(); // fish is excluded (bucketed), bookmark list is saved
 }
 
@@ -1529,6 +1642,7 @@ function updateThrowFish(th) {
     hangPose(f, hangAngle(), sEff(f), 1);
     if (th.t < tRel) return;
     th.released = true; // leaves the hook: line is free again
+    sfx("whoosh"); // sound E1: fish starts flying
     th.p0 = { x: f.x, y: f.y };
     th.v0 = {
       x: (th.I.x - f.x) / T_FLIGHT,
@@ -1570,6 +1684,19 @@ function updateThrowFish(th) {
 // those fish keep the drawn look.
 // 몸통 사진의 dock / 의자 크림색만 새 색으로 바꿉니다. [x0, y0, x1, y1]은 사진 안 픽셀 좌표예요.
 const FISHER_RECT = { dock: [0, 735, 1104, 857], stool: [510, 515, 800, 735] };
+// Why: reading pixels (loadPixels) from an image's canvas makes the browser switch THAT canvas to slow software mode
+// ("Multiple readback operations using getImageData ..."); drawing it every frame then re-uploads the whole picture to
+// the graphics card each time (30 fps lag with almost no JS time). A fresh copy that is never read back stays fast.
+function cleanCopy(img) {
+  try {
+    const c = createImage(img.width, img.height);
+    c.drawingContext.drawImage(img.canvas, 0, 0);
+    return c;
+  } catch (err) {
+    return img;
+  }
+}
+
 function recolorFisher(img) {
   const CREAM = [244, 236, 223],
     LINE = [14, 30, 11];
@@ -1617,7 +1744,7 @@ function loadFisherImages() {
         F.ARM.file,
         (b) => {
           recolorFisher(a);
-          F.img = a;
+          F.img = cleanCopy(a);
           F.armImg = b;
           F.ok = true;
           if (hook.mode === "water") {
@@ -1738,6 +1865,7 @@ function loadFishImages() {
           } catch (err) {
             /* keep the fish's own text colour */
           }
+          e.img = cleanCopy(img); // draw from a canvas that was never read back (see cleanCopy)
           e.ready = true;
         },
         () => console.warn("fish image not found:", e.file),
@@ -1808,7 +1936,7 @@ function prepareBucketImage(e, img) {
   } catch (err) {
     console.warn("could not process bucket image", err);
   }
-  e.img = img;
+  e.img = cleanCopy(img);
   e.m = m;
   e.ready = true;
 }
@@ -1844,6 +1972,7 @@ function bucketHit(m) {
 }
 
 function setUiLocked(b) {
+  if (titleEl) titleEl.style.visibility = b ? "hidden" : "visible"; // hidden while the memo list covers the page
   // memo input + reset button are off while the list is open
   inputEl.disabled = b;
   resetBtn.disabled = b;
@@ -1927,6 +2056,7 @@ function updateBucket() {
       45 * DEG,
     );
     bucket.vrot = 0;
+    bucketAway = false; // dragging again: no sound until it is released and has returned
     detectShake(m.x);
   } else {
     // back to the dock / list position, upright (soft wobble)
@@ -1934,6 +2064,14 @@ function updateBucket() {
     bucket.y += (home.y - bucket.y) * kk(8);
     bucket.vrot += (90 * (0 - bucket.rot) - 10 * bucket.vrot) * dt;
     bucket.rot += bucket.vrot * dt;
+    if (
+      bucketAway &&
+      !listOpen &&
+      Math.hypot(home.x - bucket.x, home.y - bucket.y) < 4
+    ) {
+      bucketAway = false;
+      sfx("clang"); // sound G: back in place (plays once)
+    }
   }
 }
 
@@ -1964,6 +2102,7 @@ function triggerPour() {
   const items = bookmarks.slice();
   bookmarks = [];
   bucketPress = null; // list is emptied right away (count + picture update)
+  bucketAway = false;
   const queue = items.map((b, i) => {
     const size = random(58, 96);
     return {
@@ -2014,6 +2153,7 @@ function emitPoured(P, f) {
     f.vx = P.dir * random(50, 150);
     f.vy = -random(20, 90);
     f.state = "released"; // existing physics: falls in, splashes, swims on, saves
+    f.sfxRel = "pour"; // sound C plays when it lands in the water
     f.noHookUntil = millis() + 4000;
     fishes.push(f);
   } else {
@@ -2048,6 +2188,7 @@ function updateDumped() {
       if (d.vy > 0 && d.y >= d.floor) {
         d.y = d.floor;
         d.landed = true;
+        sfx("flop", Math.random() * 0.05); // sound F: flapping on the dock
         d.lt = 0;
         d.r0 = d.rot;
       }
@@ -2332,6 +2473,13 @@ function mouseReleased() {
   }
   if (bucketPress) {
     if (!bucketPress.dragging && !bucketPour) openList(); // plain click opens the list; a drag only moved the bucket
+    if (
+      bucketPress.dragging &&
+      !bucketPour &&
+      Math.hypot(bucket.x - BUCKET.mouthX, bucket.y - (BUCKET.y + BUCKET.h)) >
+        30
+    )
+      bucketAway = true; // sound G arms only if the bucket really has to come back
     bucketPress = null; // (the bucket springs back to the dock)
     return;
   }
@@ -2614,6 +2762,31 @@ function fishImg(f) {
   return e && e.ready ? e : null;
 }
 
+// The white inside-mask painted in one colour, as a small plain canvas (alpha of the mask is kept). Built ONCE per fish /
+// picture and then only drawn (cheap): painting a full-size mask every frame for every fish made the page lag.
+const FILL_MAXW = 512; // px width of the cached fill (enough for the biggest fish, even on a retina screen)
+function paintMask(mask, col) {
+  const k = Math.min(1, FILL_MAXW / mask.width),
+    w = Math.max(1, Math.round(mask.width * k)),
+    h = Math.max(1, Math.round(mask.height * k));
+  const cv = document.createElement("canvas");
+  cv.width = w;
+  cv.height = h;
+  const c = cv.getContext("2d");
+  c.drawImage(mask.canvas, 0, 0, w, h);
+  c.globalCompositeOperation = "source-in";
+  c.fillStyle =
+    "rgb(" +
+    Math.round(red(col)) +
+    "," +
+    Math.round(green(col)) +
+    "," +
+    Math.round(blue(col)) +
+    ")";
+  c.fillRect(0, 0, w, h);
+  return cv;
+}
+
 function drawFish(f) {
   const len = f.size,
     e = fishImg(f),
@@ -2634,29 +2807,26 @@ function drawFish(f) {
       h = (w * e.img.height) / e.img.width;
     const wet = f.state === "swimming"; // 물속에서 헤엄치는 중: 안쪽을 물색으로 채워 겹친 물고기를 가림
     if (e.fillImg && (wet || f.fillAmt > 0.01)) {
-      // inside of the outline: same colour fill as the drawn fish gets when caught
-      if (wet)
-        tint(
-          red(color(COL.bg)),
-          green(color(COL.bg)),
-          blue(color(COL.bg)),
-          255,
-        );
-      else
-        tint(
-          red(f.fillCol),
-          green(f.fillCol),
-          blue(f.fillCol),
-          255 * f.fillAmt,
-        );
-      image(
-        e.fillImg,
-        -st.anchorX * w + st.offsetX * len,
-        -st.anchorY * h + st.offsetY * len,
-        w,
-        h,
-      );
-      noTint();
+      // inside of the outline. NOTE: p5's tint() re-computes every pixel on every call (very slow, it made the page lag),
+      // so the colour is painted with the plain canvas instead.
+      const ctx = drawingContext,
+        a0 = ctx.globalAlpha,
+        dx = -st.anchorX * w + st.offsetX * len,
+        dy = -st.anchorY * h + st.offsetY * len;
+      if (wet) {
+        // water-coloured copy, built once per picture
+        if (!e.fillWet) e.fillWet = paintMask(e.fillImg, color(COL.bg));
+        ctx.drawImage(e.fillWet, dx, dy, w, h);
+      } else {
+        // fish colour, fading in with fillAmt (painted once per fish)
+        if (!f.fillCv || f.fillCvFor !== e) {
+          f.fillCv = paintMask(e.fillImg, f.fillCol);
+          f.fillCvFor = e;
+        }
+        ctx.globalAlpha = a0 * f.fillAmt;
+        ctx.drawImage(f.fillCv, dx, dy, w, h);
+        ctx.globalAlpha = a0;
+      }
     }
     image(
       e.img,
@@ -2904,4 +3074,444 @@ function drawToast() {
   noStroke();
   fill(161, 148, 42, 255 * a);
   text(toast.msg, x, p.y);
+}
+
+/* ==========================================================================
+   Sound (Web Audio). Everything is optional: if audio is unsupported, blocked, or a file is missing, the sketch
+   keeps working silently. Sounds are triggered ONLY from real events through sfx(name, delaySec) — never from draw().
+   - Background: a looping water recording from AUDIO_BG_FILES (put a real recording there; see the list below).
+   - Effects: short sounds synthesised with Web Audio (no files needed).
+   - Volumes are separate: SND.bgVol (background) and SND.sfxVol (effects). Start low / clear; adjust here.
+   ========================================================================== */
+const AUDIO_BG_FILES = [
+  "assets/audio/river.mp3",
+  "assets/river.mp3",
+  "river.mp3",
+  "assets/audio/river.ogg",
+  "assets/audio/river.wav",
+  "assets/river.wav",
+  "assets/river.ogg",
+]; // first one that loads is used
+const SND = {
+  ctx: null, // created on the first user gesture (browser autoplay rule)
+  bgVol: 0.22, // background loop volume (0..1)  — keep clearly below the effects
+  sfxVol: 1.8, // effects volume (0..1)
+  muted: false,
+  ready: false,
+  bgBuf: null,
+  bgNext: 0,
+  recent: [], // start times of recent effects (limits pile-ups)
+  last: {}, // last start time per effect name (limits double triggers)
+  reelEnd: 0, // ctx time when the reel ticks end (the big splash waits for it)
+};
+try {
+  SND.muted = localStorage.getItem("fishSoundMuted") === "1"; // (key does not start with "fishingMemo": reset keeps it)
+} catch (e) {}
+
+function initAudio() {
+  // call from a user gesture; safe to call repeatedly
+  try {
+    if (SND.ctx) {
+      if (SND.ctx.state === "suspended") SND.ctx.resume();
+      return;
+    }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = (SND.ctx = new AC());
+    SND.master = ctx.createGain();
+    SND.master.gain.value = SND.muted ? 0 : 1;
+    SND.master.connect(ctx.destination);
+    SND.bg = ctx.createGain();
+    SND.bg.gain.value = SND.bgVol;
+    SND.bg.connect(SND.master);
+    const comp = ctx.createDynamicsCompressor(); // keeps many overlapping effects from clipping
+    comp.threshold.value = -16;
+    comp.ratio.value = 6;
+    comp.attack.value = 0.003;
+    comp.release.value = 0.2;
+    comp.connect(SND.master);
+    SND.sfx = ctx.createGain();
+    SND.sfx.gain.value = SND.sfxVol;
+    SND.sfx.connect(comp);
+    // short noise buffer + a small reverb tail (generated, no files)
+    const n = ctx.sampleRate * 2,
+      nb = ctx.createBuffer(1, n, ctx.sampleRate),
+      nd = nb.getChannelData(0);
+    for (let i = 0; i < n; i++) nd[i] = Math.random() * 2 - 1;
+    SND.noise = nb;
+    const rl = Math.floor(ctx.sampleRate * 1.4),
+      ir = ctx.createBuffer(2, rl, ctx.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const d = ir.getChannelData(c);
+      for (let i = 0; i < rl; i++)
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / rl, 2.6);
+    }
+    SND.rev = ctx.createConvolver();
+    SND.rev.buffer = ir;
+    SND.rev.connect(SND.sfx);
+    SND.ready = true;
+    if (ctx.state === "suspended") ctx.resume();
+    loadBackground();
+    loadClank();
+  } catch (e) {
+    console.warn("audio unavailable", e);
+    SND.ready = false;
+  }
+}
+
+// G: the bucket sound is a recording (assets/audio/bucket_clank.wav); if it is missing, the synthesised version below is used.
+const AUDIO_CLANK_FILES = [
+  "assets/audio/bucket_clank.wav",
+  "assets/bucket_clank.wav",
+  "bucket_clank.wav",
+];
+async function loadClank() {
+  for (const url of AUDIO_CLANK_FILES) {
+    try {
+      const r = await fetch(encodeURI(url));
+      if (!r.ok) continue;
+      SND.clankBuf = await SND.ctx.decodeAudioData(await r.arrayBuffer());
+      console.log("bucket sound loaded:", url);
+      return;
+    } catch (e) {
+      /* next path */
+    }
+  }
+  console.warn(
+    "bucket sound file not found (" +
+      AUDIO_CLANK_FILES.join(", ") +
+      ") - using the synthesised one",
+  );
+}
+
+// Loads the first existing file of AUDIO_BG_FILES; a missing file only logs a warning.
+async function loadBackground() {
+  for (const url of AUDIO_BG_FILES) {
+    try {
+      const r = await fetch(encodeURI(url));
+      if (!r.ok) continue;
+      const buf = await SND.ctx.decodeAudioData(await r.arrayBuffer());
+      console.log("background sound loaded:", url);
+      SND.bgBuf = buf;
+      SND.bgNext = SND.ctx.currentTime + 0.05;
+      scheduleBackground(true);
+      setInterval(() => scheduleBackground(false), 500);
+      return;
+    } catch (e) {
+      /* try the next file */
+    }
+  }
+  console.warn(
+    "background sound: no file found (" +
+      AUDIO_BG_FILES.join(", ") +
+      ") - effects still work",
+  );
+}
+
+// Seamless loop: each pass fades out while the next one (same recording) fades in (equal-power crossfade).
+function scheduleBackground(first) {
+  const ctx = SND.ctx,
+    b = SND.bgBuf;
+  if (!ctx || !b) return;
+  const xf = Math.min(3, b.duration / 4);
+  while (SND.bgNext - ctx.currentTime < 2) {
+    const t = SND.bgNext,
+      src = ctx.createBufferSource(),
+      g = ctx.createGain();
+    const fin = first && t === SND.bgNext && !SND.bgStarted ? 1.5 : xf;
+    SND.bgStarted = true;
+    const N = 32,
+      up = new Float32Array(N),
+      dn = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      up[i] = Math.sin((i / (N - 1)) * Math.PI * 0.5);
+      dn[i] = Math.cos((i / (N - 1)) * Math.PI * 0.5);
+    }
+    g.gain.setValueAtTime(0, t);
+    g.gain.setValueCurveAtTime(up, t, fin);
+    g.gain.setValueAtTime(1, t + fin);
+    g.gain.setValueAtTime(1, t + b.duration - xf);
+    g.gain.setValueCurveAtTime(dn, t + b.duration - xf, xf);
+    src.buffer = b;
+    src.connect(g);
+    g.connect(SND.bg);
+    src.start(t);
+    src.stop(t + b.duration + 0.1);
+    SND.bgNext = t + b.duration - xf;
+  }
+}
+
+function setMuted(m) {
+  SND.muted = m;
+  try {
+    localStorage.setItem("fishSoundMuted", m ? "1" : "0");
+  } catch (e) {}
+  if (SND.master)
+    SND.master.gain.setTargetAtTime(m ? 0 : 1, SND.ctx.currentTime, 0.05);
+  if (soundBtn) soundBtn.textContent = m ? "소리 OFF" : "소리 ON";
+}
+
+let soundBtn;
+function buildSoundUI() {
+  const st = document.createElement("style");
+  st.textContent =
+    "#sound-btn{position:fixed;box-sizing:border-box;background:transparent;color:#F4F4F4;border:1.5px solid #DCDCDC;border-radius:0;font-family:sans-serif;cursor:pointer;z-index:10;padding:0 8px;white-space:nowrap}" +
+    "#sound-btn:hover{background:#2C2C2C}";
+  document.head.appendChild(st);
+  soundBtn = document.createElement("button");
+  soundBtn.id = "sound-btn";
+  soundBtn.type = "button";
+  soundBtn.textContent = SND.muted ? "소리 OFF" : "소리 ON";
+  soundBtn.addEventListener("click", () => {
+    initAudio();
+    setMuted(!SND.muted);
+    soundBtn.blur();
+  });
+  document.body.appendChild(soundBtn);
+  // the first click / key / touch anywhere starts the audio (autoplay rule)
+  const first = () => {
+    initAudio();
+    for (const ev of ["pointerdown", "keydown", "touchstart"])
+      window.removeEventListener(ev, first, true);
+  };
+  for (const ev of ["pointerdown", "keydown", "touchstart"])
+    window.addEventListener(ev, first, true);
+}
+
+/* ---------- synthesis helpers ---------- */
+function sOut(node, wet) {
+  node.connect(SND.sfx);
+  if (wet > 0) {
+    const s = SND.ctx.createGain();
+    s.gain.value = wet;
+    node.connect(s);
+    s.connect(SND.rev);
+  }
+}
+function sEnv(g, t, att, peak, dec) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0002), t + att);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + att + dec);
+}
+function sTone(t, f0, f1, dur, peak, type, wet) {
+  const c = SND.ctx,
+    o = c.createOscillator(),
+    g = c.createGain();
+  o.type = type || "sine";
+  o.frequency.setValueAtTime(f0, t);
+  o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  sEnv(g, t, Math.min(0.006, dur / 3), peak, dur);
+  o.connect(g);
+  sOut(g, wet || 0);
+  o.start(t);
+  o.stop(t + dur + 0.05);
+}
+function sNoise(t, dur, ftype, f0, f1, q, peak, att, wet) {
+  const c = SND.ctx,
+    s = c.createBufferSource(),
+    f = c.createBiquadFilter(),
+    g = c.createGain();
+  s.buffer = SND.noise;
+  f.type = ftype;
+  f.Q.value = q;
+  f.frequency.setValueAtTime(f0, t);
+  f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  sEnv(g, t, att || 0.005, peak, dur);
+  s.connect(f);
+  f.connect(g);
+  sOut(g, wet || 0);
+  s.start(t, Math.random() * 1.5);
+  s.stop(t + dur + (att || 0.005) + 0.05);
+}
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+const SFX = {
+  // A: new memo drops into the water — small, bright "pop"
+  pop(t) {
+    const r = rnd(0.94, 1.08);
+    sTone(t, 520 * r, 1150 * r, 0.11, 0.38, "sine", 0.18);
+    sTone(t + 0.07, 800 * r, 1500 * r, 0.07, 0.12, "sine", 0.18);
+    sNoise(t, 0.03, "highpass", 3500, 3500, 0.7, 0.06, 0.002, 0);
+  },
+  // H: fish goes into the bucket — lower, rounder "plop"
+  plopBucket(t) {
+    const r = rnd(0.95, 1.05);
+    sTone(t, 210 * r, 470 * r, 0.17, 0.55, "sine", 0.2);
+    sTone(t + 0.1, 340 * r, 260 * r, 0.12, 0.2, "sine", 0.2);
+    sNoise(t, 0.24, "lowpass", 900, 250, 0.7, 0.22, 0.004, 0.1);
+  },
+  // B: one released fish — a soft, low watery splash (muffled hiss + rising bubbles; no bright / crinkly noise)
+  splashOne(t, v) {
+    const r = rnd(0.92, 1.08);
+    sNoise(t, 0.32, "lowpass", 2400 * r, 800 * r, 0.5, 0.42 * v, 0.03, 0.08);
+    sNoise(
+      t + 0.02,
+      0.28,
+      "bandpass",
+      1300 * r,
+      650 * r,
+      0.9,
+      0.2 * v,
+      0.03,
+      0.08,
+    );
+    for (let i = 0; i < 5; i++) {
+      const f = rnd(350, 1000) * r;
+      sTone(
+        t + 0.04 + i * rnd(0.035, 0.06),
+        f,
+        f * rnd(1.7, 2.2),
+        rnd(0.06, 0.1),
+        0.16 * v,
+        "sine",
+        0.05,
+      );
+    }
+  },
+  // C: many fish poured into the water — a lighter splash per fish (kept cheap: few nodes, no reverb)
+  splashPour(t, v) {
+    const r = rnd(0.8, 1.25);
+    sNoise(
+      t,
+      rnd(0.2, 0.3),
+      "bandpass",
+      4000 * r,
+      1700 * r,
+      0.7,
+      0.26 * v,
+      0.008,
+      0,
+    );
+    for (let i = 0; i < 2; i++) {
+      const f = rnd(700, 1800) * r;
+      sTone(t + 0.04 + i * 0.04, f, f * 1.7, 0.05, 0.07 * v, "sine", 0);
+    }
+  },
+  // D1: reel — quick light ratchet
+  reel(t) {
+    for (let i = 0; i < 14; i++) {
+      const tt = t + i * 0.04;
+      sNoise(tt, 0.014, "highpass", 3000, 3000, 1, 0.14 + i * 0.004, 0.001, 0);
+      sTone(tt, 1500, 1150, 0.012, 0.035, "square", 0);
+    }
+  },
+  // D2: fish breaks the surface — the same soft splash as B, a little bigger and longer
+  splashBig(t) {
+    const r = rnd(0.95, 1.05);
+    sNoise(t, 0.45, "lowpass", 2600 * r, 750 * r, 0.5, 0.5, 0.04, 0.08);
+    sNoise(
+      t + 0.08,
+      0.38,
+      "bandpass",
+      1400 * r,
+      600 * r,
+      0.9,
+      0.24,
+      0.05,
+      0.08,
+    );
+    for (let i = 0; i < 7; i++) {
+      const f = rnd(350, 1100) * r;
+      sTone(
+        t + 0.05 + i * rnd(0.035, 0.065),
+        f,
+        f * rnd(1.7, 2.2),
+        rnd(0.06, 0.11),
+        0.17,
+        "sine",
+        0.06,
+      );
+    }
+  },
+  // E1: fish leaves the hook — whoosh
+  whoosh(t) {
+    sNoise(t, 0.4, "bandpass", 450, 2600, 1.1, 0.38, 0.12, 0.08);
+  },
+  // F: fish lands on the dock — flapping on a hard floor (no water sounds; light on purpose: it can come in groups)
+  flop(t, v) {
+    const times = [0, 0.12, 0.26, 0.4, 0.58];
+    times.forEach((d, i) => {
+      const tt = t + d + rnd(-0.012, 0.012),
+        a = Math.pow(0.78, i) * v;
+      sNoise(tt, 0.045, "lowpass", 900, 350, 0.8, 0.4 * a, 0.002, 0);
+      sTone(tt, 170 * rnd(0.9, 1.15), 80, 0.05, 0.3 * a, "sine", 0);
+    });
+  },
+  // G: empty metal bucket settles back — "ding" then a few quick rattles ("땡그랑") with a ringing tail
+  clang(t) {
+    if (SND.clankBuf) {
+      const src = SND.ctx.createBufferSource(),
+        g = SND.ctx.createGain();
+      src.buffer = SND.clankBuf;
+      g.gain.value = 0.45; // the recording is loud (peak 0 dB)
+      src.connect(g);
+      sOut(g, 0);
+      src.start(t);
+      return;
+    }
+    const hits = [
+      [0, 1, 1.0],
+      [0.1, 0.78, 0.6],
+      [0.19, 1.12, 0.42],
+      [0.27, 0.9, 0.28],
+    ];
+    const P = [
+      [1, 0.5, 1.1],
+      [2.32, 0.35, 0.7],
+      [4.25, 0.22, 0.4],
+      [6.63, 0.12, 0.25],
+    ];
+    for (const [dt0, pm, a] of hits) {
+      const f0 = 560 * pm;
+      for (const [m, pa, d] of P)
+        sTone(
+          t + dt0,
+          f0 * m,
+          f0 * m * 0.997,
+          d * (a > 0.5 ? 1.3 : 0.8),
+          pa * a * 0.35,
+          "sine",
+          0.4,
+        );
+      sNoise(t + dt0, 0.03, "bandpass", 3500, 3500, 1.2, 0.25 * a, 0.001, 0.3);
+    }
+  },
+};
+const SFX_GAP = {
+  pop: 0.08,
+  plopBucket: 0.08,
+  splashOne: 0.08,
+  reel: 0.2,
+  splashBig: 0.2,
+  whoosh: 0.2,
+  clang: 0.3,
+}; // min seconds between starts (no double triggers)
+const SFX_CROWD = { splashPour: 1, flop: 1 }; // sounds that may come in groups: quieter the more recent ones there are
+
+// Play an effect at an event. delay in seconds. Does nothing if audio is not ready / muted.
+function sfx(name, delay) {
+  try {
+    if (!SND.ready || SND.muted || !SFX[name]) return;
+    const c = SND.ctx,
+      now = c.currentTime;
+    if (c.state === "suspended") c.resume();
+    let v = 1;
+    if (SFX_CROWD[name]) {
+      SND.recent = SND.recent.filter((r) => now - r < 0.5);
+      v = 1 / (1 + 0.3 * SND.recent.length); // many at once: total loudness stays limited
+      if (SND.recent.length > 6) return; // enough voices: skip the rest (keeps the page smooth)
+      SND.recent.push(now);
+    } else {
+      if (now - (SND.last[name] || -9) < (SFX_GAP[name] || 0.08)) return;
+      SND.last[name] = now;
+    }
+    SFX[name](now + (delay || 0) + 0.005, v);
+  } catch (e) {
+    /* never let a sound break the sketch */
+  }
+}
+// D: the big splash must come AFTER the reel ticks: call at the moment the fish leaves the water.
+function sfxAfterReel(name) {
+  if (!SND.ready) return;
+  sfx(name, Math.max(0, SND.reelEnd - SND.ctx.currentTime));
 }
