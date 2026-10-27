@@ -2924,7 +2924,7 @@ function drawMemoPanel() {
     panelCache[key] = fit;
   }
   noStroke();
-  fill(244, 244, 244, 255 * f.textAlpha);
+  fill(30, 58, 95, 255 * f.textAlpha);
   textSize(fit.fs);
   textAlign(L.narrow ? CENTER : LEFT, CENTER);
   const n = fit.lines.length,
